@@ -568,6 +568,11 @@ static int g_npcfire = 1;   /* npcfire 0|1: puppets replay the host's trigger pu
 static int g_npcfirevar = 1;  /* npcfirevar 0 block only | 1 + event 0x121ADE93 | 2 + request FUN_1012F130 | 3 + both (research: which call crashes) */
 static int g_npcnofire;  /* npcnofire 0|1 (test): puppets on the joiner do not fire */
 static int g_avai = 0, g_avai_missing;  /* avai 0|1 (experiment, off): on the host the avatar is coop.PawnPlayerAI (AI component; needs the make_avatar_ai.py patch). NPCs still ignored it */
+static int g_cflog;                  /* cflog 0|1: ceasefire research log (cf_tick) */
+static int g_agentlist = 1, g_agentcmp;  /* agentlist 0|1: NPCs from the game's agent list (agent_list_walk); 2: compare once with a memory scan */
+static double g_scanms = 2.0;         /* scanms <ms>: time budget per frame of the NPC / vehicle memory scans (0 = bytes only) */
+static int g_perf = 1;                /* perf 0|1: frame timing log (perf_frame) */
+static int g_cfav;                   /* cfav 0|1 (experiment): the avatar loses the ceasefire protection while the host's town is alarmed */
 static int g_npchitsrc = 1;          /* npchitsrc 0|1: the joiner's hits reach the host NPC as hits by the host's player (its AI ignores the avatar) */
 static int g_npcinterp = 300;        /* npcinterp <ms>: puppets are placed on the host's path this far back; 0 = NetPlayer physics */
 static DWORD g_np_react[64];     /* joiner: the puppet plays its own reaction until then (NRE1): host anim vars wait */
@@ -1778,6 +1783,31 @@ static void native_cmd(const char *ln)
         g_npcfire = n; logf_("npcfire %d", n);
     } else if (sscanf(ln, "avai %d", &n) == 1) {
         g_avai = n; g_avai_missing = 0; logf_("avai %d (next avatar spawn)", n);
+    } else if (sscanf(ln, "cflog %d", &n) == 1) {
+        g_cflog = n; logf_("cflog %d", n);
+    } else if (sscanf(ln, "agentlist %d", &n) == 1) {
+        if (n == 2) g_agentcmp = 1; else { g_agentlist = n; logf_("agentlist %d", n); }
+
+    } else if (sscanf(ln, "scanms %d", &n) == 1) {
+        g_scanms = n; logf_("scanms %d", n);
+    } else if (sscanf(ln, "perf %d", &n) == 1) {
+        g_perf = n; logf_("perf %d", n);
+    } else if (sscanf(ln, "cfav %d", &n) == 1) {
+        g_cfav = n; logf_("cfav %d", n);
+    } else if (!strncmp(ln, "cfdump", 6)) {
+        /* research: the player's agent (global [D+1652108]) and the avatar's agent, 0xA00 bytes each, to diff a
+         * ceasefire violation */
+        typedef void *(__attribute__((thiscall)) *gc_t)(void *ent, void *key);
+        BYTE *pa = *(BYTE **)(g_base + 0x1652108), *aa = NULL;
+        void *hd = NULL;
+        BYTE *o = g_av_id ? entity_obj(g_av_id, &hd) : NULL, *c;
+        if (hd) (*(int *)((BYTE *)hd + 8))--;
+        if (o && (c = ((gc_t)(g_base + 0x4E2CC0))(o, (void *)(g_base + 0xFE4090)))) aa = *(BYTE **)(c + 0x14);
+        logf_("cfdump player agent %p", pa);
+        if (pa && !IsBadReadPtr(pa, 0xA00)) hexdump_(pa, 0xA00);
+        logf_("cfdump avatar agent %p", aa);
+        if (aa && !IsBadReadPtr(aa, 0xA00)) hexdump_(aa, 0xA00);
+        logf_("cfdump end");
     } else if (sscanf(ln, "npchitsrc %d", &n) == 1) {
         g_npchitsrc = n; logf_("npchitsrc %d", n);
     } else if (sscanf(ln, "npcdiff %d", &n) == 1) {
@@ -3050,9 +3080,12 @@ static void av_agent_pause(void)
     logf_("avatar: its agent %p paused", agent);
 }
 
+static void cf_tick(DWORD now);
+
 static void hit_tick(DWORD now)
 {
     av_agent_pause();
+    cf_tick(now);
     static DWORD last;
     void *hd = NULL;
     BYTE *o;
@@ -3079,6 +3112,66 @@ typedef struct { unsigned magic, seq, count; NpcEnt e[NPC_MAX]; } NpcPkt;
 #pragma pack(pop)
 static struct { unsigned long long id; BYTE *mem, *obj; unsigned shots, fires; BYTE lastfire; void *wcur; int wmode; char wname[64]; unsigned wcat; DWORD wsent; unsigned lastact, animhash; DWORD animsent; } g_nh[NPC_MAX];
 static int g_nh_n;
+/* cflog 0|1 (research, ceasefire): the player's ceasefire status ([[D+1607408]+0xC]: +0x198 "attacked from a ceasefire
+ * zone", +0x199, +0x1A0 zone id; FUN_1095d5a0 sets it each tick from the NPC agents) and, on the host, per NPC agent
+ * (and the avatar's) the combat state +0x274 (2..5 count), zone kind +0x998 and zone flags +0x99C (FUN_1095fd00);
+ * logged on change */
+static void cf_tick(DWORD now)
+{
+    typedef void *(__attribute__((thiscall)) *gc_t)(void *ent, void *key);
+    static DWORD last;
+    static BYTE ps[2]; static unsigned long long pz;
+    static struct { unsigned long long id; int st, zk, zf; } prev[NPC_MAX + 1];
+    BYTE *g, *s;
+    int i;
+    if ((!g_cflog && !g_cfav) || now - last < 250) return;
+    last = now;
+    g = *(BYTE **)(g_base + 0x1607408);
+    s = g && !IsBadReadPtr(g + 0xC, 4) ? *(BYTE **)(g + 0xC) : NULL;
+    /* cfav: while the host's town is alarmed (+0x198), the avatar's agent is taken out of the ceasefire zone (zone
+     * kind 0, flag 0x02 clear: FUN_109605a0(1)), so the NPCs fight it as they do outside towns */
+    if (g_cfav && g_npc_role == 1 && g_av_id && s && !IsBadReadPtr(s + 0x198, 1)) {
+        typedef void *(__attribute__((thiscall)) *gc0_t)(void *ent, void *key);
+        static int was;
+        void *hd = NULL;
+        BYTE *o = entity_obj(g_av_id, &hd), *cp, *ag = NULL;
+        if (hd) (*(int *)((BYTE *)hd + 8))--;
+        if (o && (cp = ((gc0_t)(g_base + 0x4E2CC0))(o, (void *)(g_base + 0xFE4090)))) ag = *(BYTE **)(cp + 0x14);
+        if (ag && !IsBadReadPtr(ag + 0x998, 8)) {
+            if (s[0x198] && (ag[0x99C] & 2)) { *(int *)(ag + 0x998) = 0; ag[0x99C] &= ~2; }
+            if (s[0x198] != was) logf_("cfav: host town alarm %d -> %d, avatar zone flags now %02x", was, s[0x198], ag[0x99C]);
+            was = s[0x198];
+        }
+    }
+    if (!g_cflog) return;
+    if (s && !IsBadReadPtr(s + 0x198, 0x10)) {
+        unsigned long long z = *(unsigned long long *)(s + 0x1A0);
+        if (s[0x198] != ps[0] || s[0x199] != ps[1] || z != pz) {
+            logf_("cflog player: attacked-from-zone %d -> %d, +0x199 %d -> %d, zone %016llx", ps[0], s[0x198], ps[1], s[0x199], z);
+            ps[0] = s[0x198]; ps[1] = s[0x199]; pz = z;
+        }
+    }
+    if (g_npc_role != 1) return;
+    for (i = 0; i <= g_nh_n && i <= NPC_MAX; i++) {
+        unsigned long long id = i < g_nh_n ? g_nh[i].id : g_av_id;
+        void *hd = NULL;
+        BYTE *obj, *comp, *ag;
+        int st, zk, zf;
+        if (!id) continue;
+        obj = entity_obj(id, &hd);
+        if (hd) (*(int *)((BYTE *)hd + 8))--;
+        if (!obj) continue;
+        comp = ((gc_t)(g_base + 0x4E2CC0))(obj, (void *)(g_base + 0xFE4090));
+        ag = comp ? *(BYTE **)(comp + 0x14) : NULL;
+        if (!ag || IsBadReadPtr(ag + 0x274, 4) || IsBadReadPtr(ag + 0x998, 8)) continue;
+        st = *(int *)(ag + 0x274); zk = *(int *)(ag + 0x998); zf = ag[0x99C];
+        if (prev[i].id == id && prev[i].st == st && prev[i].zk == zk && prev[i].zf == zf) continue;
+        logf_("cflog %s %llu: state %d, zone kind %d, zone flags %02x, at (%.0f %.0f)", i < g_nh_n ? "npc" : "avatar", id, st, zk, zf,
+              *(float *)(obj + 0x60), *(float *)(obj + 0x64));
+        prev[i].id = id; prev[i].st = st; prev[i].zk = zk; prev[i].zf = zf;
+    }
+}
+
 static BYTE g_npc_this[0x40];
 /* lid: the local entity id when the NPC had to be spawned here (the host's id is unknown to this world) */
 static struct { unsigned long long id, lid; BYTE *agent, *comp, *mem, *obj; int state, nospawn, gone; NpcEnt e; DWORD last, req; unsigned shots, fires, supp, av[0x70]; int avok; BYTE *mb; void *wcur; int wmode; char wname[64], hw[64]; unsigned wcat, hcat, lastact; int hset, wtries, ownact, respawn; DWORD wfix; } g_np[NPC_MAX];
@@ -3091,16 +3184,59 @@ static int g_np_n;
  * agent pointers in their first 0x300 bytes), so this stays a memory scan. */
 /* vt / hoff: object vtable RVA and the offset of its entity holder pointer (0 = CPawnAgent EC5078, +4) */
 typedef struct { BYTE *p, *c; int busy; unsigned vt, hoff; } IncScan;
+/* the game's own list of CPawnAgents (what FUN_1095d5a0 walks for the ceasefire): AI world [D+1607608], class map at +0x44
+ * (FUN_10172730 = find, header node [+0x54]), key = the CPawnAgent class id [D+16549A0]; the found node's list end is
+ * [node+0x20], entries are {next, prev, ?, agent}. agentlist 0 goes back to the memory scan. Returns the count, -1 = none */
+static int agent_list_walk(void (*cb)(unsigned long long id, BYTE *obj, BYTE *agent, void *ctx), void *ctx)
+{
+    typedef void (__attribute__((thiscall)) *find_t)(void *map, BYTE **out, unsigned *key);
+    BYTE *w = *(BYTE **)(g_base + 0x1607608), *node = NULL, *end, *p;
+    unsigned key, vt = (unsigned)(g_base + 0xEC5078);
+    int n = 0, guard = 0;
+    if (!w || IsBadReadPtr(w + 0x44, 0x14) || IsBadReadPtr((void *)(g_base + 0x16549A0), 4)) return -1;
+    key = *(unsigned *)(g_base + 0x16549A0);
+    if (!key) return -1;
+    ((find_t)(g_base + 0x172730))(w + 0x44, &node, &key);
+    if (!node || node == *(BYTE **)(w + 0x54) || IsBadReadPtr(node + 0x20, 4)) return -1;
+    end = *(BYTE **)(node + 0x20);
+    if (!end || IsBadReadPtr(end, 4)) return -1;
+    for (p = *(BYTE **)end; p && p != end && guard < 8192; p = *(BYTE **)p, guard++) {
+        BYTE *ag, *holder, *obj;
+        if (IsBadReadPtr(p, 0x10)) return n ? n : -1;
+        ag = *(BYTE **)(p + 0xC);
+        if (!ag || IsBadReadPtr(ag, 8) || *(unsigned *)ag != vt) continue;
+        holder = *(BYTE **)(ag + 4);
+        if (!holder || IsBadReadPtr(holder, 16) || !(obj = *(BYTE **)(holder + 0xC)) || IsBadReadPtr(obj, 0xA4)) continue;
+        n++;
+        cb(*(unsigned long long *)holder, obj, ag, ctx);
+    }
+    return n;
+}
+static void agent_count_cb(unsigned long long id, BYTE *obj, BYTE *agent, void *ctx) { (void)id; (void)obj; (void)agent; (*(int *)ctx)++; }
 static int npc_scan_step(IncScan *s, size_t budget, void (*cb)(unsigned long long id, BYTE *obj, BYTE *agent, void *ctx), void *ctx)
 {
     static BYTE chunk[0x10000];
     MEMORY_BASIC_INFORMATION mbi;
     unsigned vt = (unsigned)(g_base + (s->vt ? s->vt : 0xEC5078)), ho = s->hoff ? s->hoff : 4;
     size_t done = 0;
+    DWORD t0 = GetTickCount();
+    LARGE_INTEGER q0, qf;
+    unsigned nq = 0, nh = 0;
+    int r = 0;
+    QueryPerformanceCounter(&q0); QueryPerformanceFrequency(&qf);
+    if (!s->vt && g_agentlist == 1 && !budget) { s->busy = 1; s->p = NULL; s->c = NULL; return 0; }   /* the start call: walk on the next step, as the callers expect */
+    if (!s->vt && g_agentlist == 1) {
+        /* agent scans: walk the game's list in one go instead (a few microseconds); fall back to the scan if it fails */
+        static int said;
+        int k = agent_list_walk(cb, ctx);
+        if (k >= 0) { if (!said++) logf_("agentlist: %d agents from the game's list (memory scan not needed)", k); s->busy = 0; return 1; }
+        if (said < 1000) { said = 1000; logf_("agentlist: the game's list was not found - memory scan"); }
+    }
     if (!s->busy) { s->busy = 1; s->p = NULL; s->c = NULL; }
     while (done < budget) {
         BYTE *rb, *rend;
-        if (VirtualQuery(s->p, &mbi, sizeof mbi) != sizeof mbi) { s->busy = 0; return 1; }
+        nq++;
+        if (VirtualQuery(s->p, &mbi, sizeof mbi) != sizeof mbi) { s->busy = 0; r = 1; break; }
         rb = (BYTE *)mbi.BaseAddress; rend = rb + mbi.RegionSize;
         if (mbi.State == MEM_COMMIT && !(mbi.Protect & (PAGE_GUARD | PAGE_NOACCESS)) && (mbi.Protect & PAGE_READWRITE) && mbi.RegionSize < 0x20000000) {
             if (!s->c || s->c < rb || s->c >= rend) s->c = rb;
@@ -3113,16 +3249,27 @@ static int npc_scan_step(IncScan *s, size_t budget, void (*cb)(unsigned long lon
                         if (*(unsigned *)(chunk + k) != vt) continue;
                         holder = *(BYTE **)(chunk + k + ho);
                         if (!holder || IsBadReadPtr(holder, 16) || !(obj = *(BYTE **)(holder + 0xC)) || IsBadReadPtr(obj, 0xA4)) continue;
+                        nh++;
                         cb(*(unsigned long long *)holder, obj, s->c + k, ctx);
                     }
                 s->c += n; done += n;
+                if (g_scanms > 0) {   /* time budget per frame: some ranges read at ~0.3 GB/s (paged out), 16 MB was a 50-80 ms hitch */
+                    LARGE_INTEGER q;
+                    QueryPerformanceCounter(&q);
+                    if ((double)(q.QuadPart - q0.QuadPart) * 1000.0 / (double)qf.QuadPart > (s->vt ? g_scanms * 0.5 : g_scanms)) { budget = 0; break; }
+                }
             }
-            if (s->c < rend) return 0;
+            if (s->c < rend) break;
         }
         s->p = rend; s->c = NULL;
-        if ((ULONG_PTR)rend <= (ULONG_PTR)rb) { s->busy = 0; return 1; }
+        if ((ULONG_PTR)rend <= (ULONG_PTR)rb) { s->busy = 0; r = 1; break; }
     }
-    return 0;
+    if (g_perf && GetTickCount() - t0 > 20) {
+        static unsigned slow;
+        if (slow++ < 200) logf_("perf: scan step (vt %x) %lu ms: %u KB read, %u regions queried, %u callbacks, at %p%s", s->vt, (unsigned long)(GetTickCount() - t0),
+                                (unsigned)(done >> 10), nq, nh, s->p, r ? ", pass done" : "");
+    }
+    return r;
 }
 static int npc_has_netcomp(BYTE *obj)
 {
@@ -3565,6 +3712,14 @@ static void npc_host_tick(DWORD now)
     int i, n = 0;
     static IncScan hs;
     static float mp[4];
+    if (g_agentcmp) {
+        IncScan t; int a = 0, b = 0, r;
+        g_agentcmp = 0;
+        memset(&t, 0, sizeof t);
+        g_agentlist = 0; while (!npc_scan_step(&t, 64u << 20, agent_count_cb, &b)) ; g_agentlist = 1;
+        r = agent_list_walk(agent_count_cb, &a);
+        logf_("agentlist: the game's list %d agents (walk %d), memory scan %d", a, r, b);
+    }
     if (g_npc_role != 1 || g_ns == INVALID_SOCKET || !player_ready(g_net_id)) return;
     /* re-pick the NPCs near us or the avatar: a pass every 15 s, 16 MB of memory per frame (a full pass at once was a
      * ~280 ms hitch); the finished list keeps the mementos and counters of the NPCs that stay */
@@ -3688,7 +3843,15 @@ static DWORD g_np_first;
  * is placed every frame on that path, npcinterp ms in the past so there are two states to blend between. */
 static DWORD g_np_lastrx;
 static DWORD g_np_firet[NPC_MAX];       /* last replayed shot of a puppet */
-static DWORD g_np_miss[NPC_MAX];        /* when a save NPC near us was first found missing here */
+/* joiner: how long our player has been in the world; a save NPC missing in the first 20 s after a load is usually still
+ * streaming in (a copy spawned then made a twin, and removing the original when it came crashed once: R6025) */
+static DWORD join_ready_ms(DWORD now)
+{
+    static DWORD since;
+    if (!player_ready(g_net_id)) { since = 0; return 0; }
+    if (!since) since = now | 1;
+    return (int)(now - since) > 0 ? now - since : 0;
+}static DWORD g_np_miss[NPC_MAX];        /* when a save NPC near us was first found missing here */
 static unsigned char g_np_rm[NPC_MAX];   /* puppet removed because the host no longer has it: spawn again if it returns */
 typedef struct { DWORD t; float p[3], y; } NpSample;
 static NpSample g_np_s[NPC_MAX][8];
@@ -4187,7 +4350,7 @@ static void npc_join_local_cb(unsigned long long id, BYTE *obj, BYTE *agent, voi
         void *hd = NULL;
         BYTE *me;
         float dx, dy;
-        if (!g_np_first || GetTickCount() - g_np_first < 10000 || g_np_hostcount >= NPC_MAX) return;
+        if (!g_np_first || (int)(GetTickCount() - g_np_first) < 10000 || g_np_hostcount >= NPC_MAX) return;
         me = entity_obj(g_net_id, &hd);
         if (hd) (*(int *)((BYTE *)hd + 8))--;
         if (!me) return;
@@ -4263,6 +4426,7 @@ static void npc_join_tick(DWORD now)
     static int need_agent;
     int j, k;
     if (g_npc_role != 2) return;
+    join_ready_ms(now);   /* starts its clock when our player enters the world */
     reinf_tick();
     static IncScan js;
     /* an NPC we just spawned for the host runs its own AI until the scan has found its agent: don't wait 3 s for that */
@@ -4312,9 +4476,11 @@ static void npc_join_tick(DWORD now)
             }
             /* only NPCs spawned during play (ids with the high bit): a save NPC can simply not be streamed in yet, and
              * spawning one made a second copy next to the original */
-            if (g_np[j].state == 0 && ((g_np[j].id >> 63) || g_np_rm[j] || (g_np_miss[j] && now - g_np_miss[j] > 8000)) && !g_np[j].lid && !g_np[j].nospawn && e->hp > 0 && now - g_np[j].last < 1500 && now - g_np[j].req > 3000 && g_ns != INVALID_SOCKET) {
+            if (g_np[j].state == 0 && ((g_np[j].id >> 63) || g_np_rm[j] || (g_np_miss[j] && (int)(now - g_np_miss[j]) > 8000 && join_ready_ms(now) > 20000 && g_np_first && (int)(now - g_np_first) > 20000)) && !g_np[j].lid && !g_np[j].nospawn && e->hp > 0 && now - g_np[j].last < 1500 && now - g_np[j].req > 3000 && g_ns != INVALID_SOCKET) {
                 NpcArcPkt q;
                 memset(&q, 0, sizeof q); q.magic = NREQ_MAGIC; q.id = g_np[j].id; g_np[j].req = now;
+                logf_("npcsync join: asking for NPC %llu (slot %d, high bit %d, removed %d, missing %ld ms, ready %lu ms, packets %ld ms)", g_np[j].id, j, (int)(g_np[j].id >> 63), g_np_rm[j],
+                      g_np_miss[j] ? (long)(int)(now - g_np_miss[j]) : 0l, (unsigned long)join_ready_ms(now), g_np_first ? (long)(int)(now - g_np_first) : 0l);
                 sendto(g_ns, (char *)&q, sizeof q, 0, (struct sockaddr *)&g_peer, sizeof g_peer);
             }
             continue;
@@ -5339,7 +5505,8 @@ static void veh_send_tick(DWORD now)
     if (!g_vehsync || g_ns == INVALID_SOCKET || !player_ready(g_net_id)) return;
     /* host: re-pick the vehicles within 150 m of us or the avatar, a pass every 10 s spread over frames */
     if (g_npc_role == 1) {
-        if (!vs.busy && (!last_scan || now - last_scan > 10000)) {
+        static DWORD vend;   /* the next pass starts 10 s after the last one ended (a time-limited pass takes ~30 s) */
+        if (!vs.busy && (!last_scan || now - vend > 10000)) {
             void *hd = NULL;
             BYTE *me = entity_obj(g_net_id, &hd), *av;
             if (hd) { (*(int *)((BYTE *)hd + 8))--; hd = NULL; }
@@ -5353,6 +5520,7 @@ static void veh_send_tick(DWORD now)
         }
         if (vs.busy && npc_scan_step(&vs, 16u << 20, veh_scan_cb, mp)) {
             int j, k, old = g_vh_n;
+            vend = now;
             for (j = 0; j < g_vh_bn; j++) {
                 for (k = 0; k < g_vh_n && g_vh[k].id != g_vh_build[j]; k++) ;
                 if (k == g_vh_n && g_vh_n < 32) { memset(&g_vh[g_vh_n], 0, sizeof g_vh[0]); g_vh[g_vh_n++].id = g_vh_build[j]; }
@@ -5933,6 +6101,49 @@ static void door_tick(DWORD now)
     if (g_doorsync && g_door_seq && now - g_door_t < 250 && now - g_door_sent_t >= 100) { door_send(); g_door_sent_t = now; }
 }
 
+/* perf (on by default, `perf 0` off): time of each probe tick per frame (QueryPerformanceCounter) and the gap between
+ * frames; every 10 s one line with the frame count, frames over 50 / 150 ms, the worst gap, and the probe's own worst
+ * and average time per frame per tick; a gap over 300 ms is logged at once with what the probe spent in that frame */
+static const char *g_pt_name[13] = { "av", "rld", "hp", "map", "notice", "world", "npchost", "hit", "dumpd", "npcjoin", "veh", "sig", "door" };
+static double g_pt_cur[13], g_pt_max[13], g_pt_sum[13], g_pt_qpf;
+static unsigned g_pf_n, g_pf_50, g_pf_150;
+static DWORD g_pf_last, g_pf_report, g_pf_worst;
+#define PT(k, call) do { LARGE_INTEGER a_, b_; if (!g_perf) { call; break; } QueryPerformanceCounter(&a_); call; QueryPerformanceCounter(&b_); \
+    g_pt_cur[k] += (double)(b_.QuadPart - a_.QuadPart) * 1000.0 / g_pt_qpf; } while (0)
+static void perf_frame(DWORD now)
+{
+    int k;
+    double tot = 0;
+    char top[160];
+    if (!g_perf) return;
+    if (!g_pt_qpf) { LARGE_INTEGER f; QueryPerformanceFrequency(&f); g_pt_qpf = (double)f.QuadPart; g_pf_report = now; }
+    for (k = 0; k < 13; k++) { tot += g_pt_cur[k]; g_pt_sum[k] += g_pt_cur[k]; if (g_pt_cur[k] > g_pt_max[k]) g_pt_max[k] = g_pt_cur[k]; }
+    if (g_pf_last) {
+        DWORD gap = now - g_pf_last;
+        g_pf_n++;
+        if (gap > 50) g_pf_50++;
+        if (gap > 150) g_pf_150++;
+        if (gap > g_pf_worst) g_pf_worst = gap;
+        if (gap > 300) {
+            int o = 0;
+            for (k = 0; k < 13 && o < 140; k++) if (g_pt_cur[k] > 1.0) o += snprintf(top + o, sizeof top - o, " %s %.0f", g_pt_name[k], g_pt_cur[k]);
+            top[o] = 0;
+            logf_("perf: hitch %lu ms; probe in the frame before it %.1f ms%s", (unsigned long)gap, tot, o ? top : "");
+        }
+    }
+    g_pf_last = now;
+    for (k = 0; k < 13; k++) g_pt_cur[k] = 0;
+    if (now - g_pf_report >= 10000 && g_pf_n) {
+        int o = 0;
+        for (k = 0; k < 13 && o < 140; k++) if (g_pt_max[k] > 2.0 || g_pt_sum[k] / g_pf_n > 0.3)
+            o += snprintf(top + o, sizeof top - o, " %s %.1f/%.2f", g_pt_name[k], g_pt_max[k], g_pt_sum[k] / g_pf_n);
+        top[o] = 0;
+        logf_("perf: %u frames in %lu ms (%.0f fps), >50 ms %u, >150 ms %u, worst %lu ms; probe max/avg ms:%s", g_pf_n,
+              (unsigned long)(now - g_pf_report), g_pf_n * 1000.0 / (now - g_pf_report), g_pf_50, g_pf_150, (unsigned long)g_pf_worst, o ? top : " all small");
+        g_pf_n = g_pf_50 = g_pf_150 = 0; g_pf_worst = 0; g_pf_report = now;
+        for (k = 0; k < 13; k++) g_pt_max[k] = g_pt_sum[k] = 0;
+    }
+}
 static void net_tick(void)
 {
     DWORD now;
@@ -6150,19 +6361,20 @@ static void net_tick(void)
             }
         }
     }
-    av_tick(now);
-    rld_host_tick(now);
-    hp_tick(now);
-    map_tick(now);
-    notice_tick();
-    world_tick(now);
-    npc_host_tick(now);
-    hit_tick(now);
-    dumpd_tick(now);
-    npc_join_tick(now);
-    veh_tick(now);
-    sig_tick(now);
-    door_tick(now);
+    perf_frame(now);
+    PT(0, av_tick(now));
+    PT(1, rld_host_tick(now));
+    PT(2, hp_tick(now));
+    PT(3, map_tick(now));
+    PT(4, notice_tick());
+    PT(5, world_tick(now));
+    PT(6, npc_host_tick(now));
+    PT(7, hit_tick(now));
+    PT(8, dumpd_tick(now));
+    PT(9, npc_join_tick(now));
+    PT(10, veh_tick(now));
+    PT(11, sig_tick(now));
+    PT(12, door_tick(now));
     /* send at 20 Hz */
     if ((g_bodymat || g_net_id) && now - g_net_lastsend >= 50 && player_ready(g_net_id)) {
         NetPktX4 q4;
