@@ -4441,6 +4441,19 @@ static void npc_join_tick(DWORD now)
                     fired[j]++; fire_t[j] = now; g_np_firet[j] = now;
                     if (h < 80.0f && npc_layer0_ok(obj) && !ndp_mounted(g_np[j].id)) { static unsigned logged; static const float mo[3] = { 0, 0, 1.5f }; int q; /* fire block only, as the avatar's default (state) mode: NetPlayer hands it to the weapon; direct calls crashed */ *(int *)(m + 0x1A0) = -1; m[0x19C] = 1; *(unsigned *)(m + 0x218) = 0xFFFFFFFFu; *(unsigned *)(m + 0x21C) = 0xFFFFFFFFu; m[0x214] = 1; np_pos(m + 0x1A4, t); for (q = 0; q < 3; q++) np_q(m + 0x220 + 0x14 * q, mo[q], 3.0f); if (g_npcfirevar) npc_fire(obj, t); if (logged++ < 30) logf_("npcfire: puppet %llu fired (%u of %u) at (%.1f %.1f %.1f), host impact (%.1f %.1f %.1f)", g_np[j].id, fired[j], e->pulls, t[0], t[1], t[2], e->shot[0], e->shot[1], e->shot[2]); }
                 }
+                {
+                    /* 0x121ADE93 is the startshooting signal: the weapon keeps firing (and its sound loops) until stopshooting */
+                    static unsigned char stopped[NPC_MAX];
+                    if (fire_t[j] && now - fire_t[j] < 150) stopped[j] = 0;
+                    else if (fire_t[j] && !stopped[j]) {
+                        typedef void *(__attribute__((thiscall)) *tags_t)(void *pawn);
+                        typedef void (__attribute__((thiscall)) *ev_t)(void *tags, unsigned ev);
+                        void *pw = ((np_getcomp_t)(g_base + 0x4E2CC0))(obj, (void *)(g_base + 0xFDE39C)), *tg;
+                        stopped[j] = 1;
+                        tg = pw ? ((tags_t)(*(void ***)pw)[0x78 / 4])(pw) : NULL;
+                        if (tg) ((ev_t)(g_base + 0x29DA10))(tg, 0x45009466u);   /* stopshooting */
+                    }
+                }
                 if (fire_t[j] && now - fire_t[j] < 1500 && h < 80.0f) {
                     float yaw = atan2f(-dx, dy), pitch = atan2f(dz, h);
                     np_q(m + 0xAC, pitch, 360.0f); np_q(m + 0xC0, yaw, 360.0f); np_q(m + 0xD4, pitch, 360.0f); np_q(m + 0xE8, yaw, 360.0f);
