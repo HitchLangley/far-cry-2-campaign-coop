@@ -565,6 +565,7 @@ static void npc_anim_apply(BYTE *mb);
 static int g_reinfblock = 1;         /* reinfblock 0|1: the joiner's world spawns no reinforcements of its own */
 static int g_npcdiff;                /* npcdiff 0|1: log each live puppet's error against the host once a second */
 static int g_npcfire = 1;   /* npcfire 0|1: puppets replay the host's trigger pulls */
+static int g_npcfirevar = 1;  /* npcfirevar 0 block only | 1 + event 0x121ADE93 | 2 + request FUN_1012F130 | 3 + both (research: which call crashes) */
 static int g_npcnofire;  /* npcnofire 0|1 (test): puppets on the joiner do not fire */
 static int g_avai = 0, g_avai_missing;  /* avai 0|1 (experiment, off): on the host the avatar is coop.PawnPlayerAI (AI component; needs the make_avatar_ai.py patch). NPCs still ignored it */
 static int g_npchitsrc = 1;          /* npchitsrc 0|1: the joiner's hits reach the host NPC as hits by the host's player (its AI ignores the avatar) */
@@ -1771,6 +1772,8 @@ static void native_cmd(const char *ln)
         g_npcinterp = n; logf_("npcinterp %d", n);
     } else if (sscanf(ln, "npcnofire %d", &n) == 1) {
         g_npcnofire = n; logf_("npcnofire %d", n);
+    } else if (sscanf(ln, "npcfirevar %d", &n) == 1) {
+        g_npcfirevar = n; logf_("npcfirevar %d", n);
     } else if (sscanf(ln, "npcfire %d", &n) == 1) {
         g_npcfire = n; logf_("npcfire %d", n);
     } else if (sscanf(ln, "avai %d", &n) == 1) {
@@ -2585,13 +2588,12 @@ static void npc_fire(BYTE *obj, const float *point)
     inv = pawn ? ((inv_t)(g_base + 0x7E140))(pawn) : NULL;
     wc = inv ? ((cur_t)(g_base + 0x127DA0))(inv) : NULL;
     if (!wc) return;
-    ((BYTE *)pawn)[0x140 + 6] |= 0x20;
     req[0] = req[1] = req[2] = req[3] = 0xFFFFFFFFu;
     memcpy(&req[4], point, 12); memcpy(&req[7], off, 12);
-    ((req_t)(g_base + 0x12F130))(wc, req, 0);
+    if (g_npcfirevar & 2) ((req_t)(g_base + 0x12F130))(wc, req, 0);
     /* no direct weapon fire (vf+0x80): on puppets it crashed the joiner 60 ms later in a worker (Dunia+61F293), 3 of 3 */
     tags = ((tags_t)(*(void ***)pawn)[0x78 / 4])(pawn);
-    if (tags) ((ev_t)(g_base + 0x29DA10))(tags, 0x121ADE93u);
+    if (tags && (g_npcfirevar & 1)) ((ev_t)(g_base + 0x29DA10))(tags, 0x121ADE93u);
 }
 
 /* per tick: position (with the test offset), velocity from consecutive packets, yaw for aim/body, fire origin/dir */
@@ -4427,10 +4429,17 @@ static void npc_join_tick(DWORD now)
                 }
                 dx = t[0] - *(float *)(obj + 0x60); dy = t[1] - *(float *)(obj + 0x64); dz = t[2] - (*(float *)(obj + 0x68) + 1.5f);
                 h = sqrtf(dx * dx + dy * dy);
+                {
+                    /* only fresh trigger pulls: a backlog replayed 110 ms apart kept a puppet firing from cover or while reloading */
+                    static unsigned seen_p[NPC_MAX];
+                    static DWORD pull_t[NPC_MAX];
+                    if (e->pulls != seen_p[j]) { seen_p[j] = e->pulls; pull_t[j] = now; }
+                    if (now - pull_t[j] > 250) fired[j] = e->pulls;
+                }
                 if (e->pulls != fired[j] && now - fire_t[j] >= 110) {
-                    if (e->pulls - fired[j] > 8) fired[j] = e->pulls - 1;
+                    if (e->pulls - fired[j] > 2) fired[j] = e->pulls - 1;
                     fired[j]++; fire_t[j] = now; g_np_firet[j] = now;
-                    if (h < 80.0f && npc_layer0_ok(obj) && !ndp_mounted(g_np[j].id)) { static unsigned logged; static const float mo[3] = { 0, 0, 1.5f }; int q; /* fire block only, as the avatar's default (state) mode: NetPlayer hands it to the weapon; direct calls crashed */ *(int *)(m + 0x1A0) = -1; m[0x19C] = 1; *(unsigned *)(m + 0x218) = 0xFFFFFFFFu; *(unsigned *)(m + 0x21C) = 0xFFFFFFFFu; m[0x214] = 1; np_pos(m + 0x1A4, t); for (q = 0; q < 3; q++) np_q(m + 0x220 + 0x14 * q, mo[q], 3.0f); if (logged++ < 30) logf_("npcfire: puppet %llu fired (%u of %u) at (%.1f %.1f %.1f), host impact (%.1f %.1f %.1f)", g_np[j].id, fired[j], e->pulls, t[0], t[1], t[2], e->shot[0], e->shot[1], e->shot[2]); }
+                    if (h < 80.0f && npc_layer0_ok(obj) && !ndp_mounted(g_np[j].id)) { static unsigned logged; static const float mo[3] = { 0, 0, 1.5f }; int q; /* fire block only, as the avatar's default (state) mode: NetPlayer hands it to the weapon; direct calls crashed */ *(int *)(m + 0x1A0) = -1; m[0x19C] = 1; *(unsigned *)(m + 0x218) = 0xFFFFFFFFu; *(unsigned *)(m + 0x21C) = 0xFFFFFFFFu; m[0x214] = 1; np_pos(m + 0x1A4, t); for (q = 0; q < 3; q++) np_q(m + 0x220 + 0x14 * q, mo[q], 3.0f); if (g_npcfirevar) npc_fire(obj, t); if (logged++ < 30) logf_("npcfire: puppet %llu fired (%u of %u) at (%.1f %.1f %.1f), host impact (%.1f %.1f %.1f)", g_np[j].id, fired[j], e->pulls, t[0], t[1], t[2], e->shot[0], e->shot[1], e->shot[2]); }
                 }
                 if (fire_t[j] && now - fire_t[j] < 1500 && h < 80.0f) {
                     float yaw = atan2f(-dx, dy), pitch = atan2f(dz, h);
