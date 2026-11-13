@@ -2861,7 +2861,11 @@ static int __attribute__((thiscall)) st_hook(BYTE *self, BYTE *ev)
     if (s == 2 && (!strcmp(nm, "PullTrigger") || !strcmp(nm, "start_shoot") || !strcmp(nm, "WeaponFireBullet")) && !npc_shot_ok(self, nm[0] == 'P')) return 0;
     if (!strcmp(nm, "Stims") && !IsBadReadPtr(ev, 0x94)) {
         unsigned long long src = st_hid(*(BYTE **)(ev + 0x3C));
-        if (g_hitsync && s == 0 && src == g_net_id && *(int *)(ev + 0x58) && g_ns != INVALID_SOCKET) {
+        /* explosions (crossbow bolts, grenades) come with the projectile as source and the shooter as instigator */
+        unsigned long long inst = st_hid(*(BYTE **)(ev + 0x40));
+        unsigned long long by = src == g_net_id || inst == g_net_id ? g_net_id : src;
+        unsigned long long byav = g_av_id && (src == g_av_id || inst == g_av_id) ? g_av_id : src;
+        if (g_hitsync && s == 0 && by == g_net_id && *(int *)(ev + 0x58) && g_ns != INVALID_SOCKET) {
             HitPkt hp;
             st_pack(&hp, ev, evt);
             hp.magic = HIT_MAGIC; hp.seq = ++g_hit_tx;
@@ -2869,14 +2873,14 @@ static int __attribute__((thiscall)) st_hook(BYTE *self, BYTE *ev)
             if (g_hit_tx <= 50) logf_("hit %u: we hit the avatar (type %d, amount %d, flags %x, part %08x, sub rva %x, tail %08x %08x %08x %08x %08x %08x %08x %08x) -> sent",
                                       g_hit_tx, hp.type, hp.amount, hp.flags, hp.part, hp.subvt, hp.tail[0], hp.tail[1], hp.tail[2], hp.tail[3], hp.tail[4], hp.tail[5], hp.tail[6], hp.tail[7]);
         }
-        if (g_hitsync && s == 2 && g_npc_role == 2 && src == g_net_id && *(int *)(ev + 0x58) && g_ns != INVALID_SOCKET) {
+        if (g_hitsync && s == 2 && g_npc_role == 2 && by == g_net_id && *(int *)(ev + 0x58) && g_ns != INVALID_SOCKET) {
             NpcHitPkt nk;
             st_pack(&nk.h, ev, evt);
             nk.h.magic = NHIT_MAGIC; nk.h.seq = ++g_nhit_tx; nk.npc = npc_id_of(self);
             if (nk.npc) sendto(g_ns, (char *)&nk, sizeof nk, 0, (struct sockaddr *)&g_peer, sizeof g_peer);
-            if (g_nhit_tx <= 50) logf_("npc hit %u: we hit NPC %llu (type %d, amount %d, part %08x) -> sent to the host", g_nhit_tx, nk.npc, nk.h.type, nk.h.amount, nk.h.part);
+            if (g_nhit_tx <= 50) logf_("npc hit %u: we hit NPC %llu (type %d, amount %d, part %08x, %s) -> sent to the host", g_nhit_tx, nk.npc, nk.h.type, nk.h.amount, nk.h.part, src == g_net_id ? "direct" : "as instigator");
         }
-        if (g_hitsync && s == 2 && g_npc_role == 1 && src && src == g_av_id) {
+        if (g_hitsync && s == 2 && g_npc_role == 1 && byav && byav == g_av_id) {
             if (++g_nhit_blocked <= 50) logf_("npc hit: dropped the avatar's replayed stim on NPC %llu (amount %d) - the joiner's window decides", npc_id_of(self), *(int *)(ev + 0x58));
             return 0;
         }
@@ -4419,7 +4423,7 @@ static void npc_join_tick(DWORD now)
             BYTE *me3 = entity_obj(g_net_id, &hd3);
             if (hd3) (*(int *)((BYTE *)hd3 + 8))--;
             if (!seen[j]) { seen[j] = 1; fired[j] = e->pulls; }
-            if (g_npcfire && me3 && e->hp > 0) {
+            if (g_npcfire && me3 && e->hp > 0 && !ndp_mounted(g_np[j].id)) {   /* gunners: the gun and mount_tick do it; stopshooting knocked them off */
                 float t[3], dx, dy, dz, h;
                 t[0] = *(float *)(me3 + 0x60); t[1] = *(float *)(me3 + 0x64); t[2] = *(float *)(me3 + 0x68) + 1.2f;
                 {
