@@ -98,7 +98,9 @@ forwarding. The probe talks only to its local relay: `netstart <game port> 127.0
 Python 3, 64-bit; the Steam transport also needs the Steam client running and `steam_api64.dll`
 from the Steamworks.NET Standalone release 2025.164.1 (`Windows-x64/steam_api64.dll`,
 SHA-256 `eb17909a76668cf9ae0b92a618a34a50f6c73d3a6787cb4dd8ce36a8b10bfb75`; not included here).
-It runs as Steam's free "Spacewar" app (AppID 480), so friends see you as "playing Spacewar".
+By default it runs under Far Cry 2's own AppID 19900 (both accounts must own the game; friends see "Far Cry 2").
+With `--appid 480` it runs as Steam's free "Spacewar" app instead, which works for any account (friends then see
+"playing Spacewar"); `start-coop.ps1` takes `-AppId 480` for the same.
 
 ```
 host:   python relay\fc2_relay.py --transport steam --host --steam-dll <steam_api64.dll> --game-port 9101 --relay-port 9201 [--invite "<friend's Steam name>"]
@@ -110,7 +112,7 @@ The host creates a friends-only lobby (tagged `fc2coop=1`), sets its Steam rich 
 `+connect_lobby <id>`, and logs the id; the friend joins by id (`--join <id>`), with `--join friend`, which
 finds a friend hosting one, or with `--join wait`, which joins when the friend accepts the host's Steam
 invite (`--invite`) or clicks Join Game on the host in the Steam friends list (Steam callbacks 333 and 337;
-start the relay before accepting, otherwise Steam starts the real Spacewar instead). Sessions are accepted only
+start the relay before accepting, otherwise Steam starts the app itself instead). Sessions are accepted only
 from lobby members; probe packets go unreliable on channel 0, a keep-alive and goodbye go reliable on
 channel 1, and a peer silent for 20 s is dropped. `--transport udp --udp-local <port> --udp-peer <port>`
 is a stand-in that relays over plain UDP, used by the test to run the whole chain on one PC.
