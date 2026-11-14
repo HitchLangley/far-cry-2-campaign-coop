@@ -1,10 +1,10 @@
-# fc2-coop-probe: Far Cry 2 co-op (prototype)
+# Far Cry 2 Campaign Coop (prototype)
 
 A two-player co-op prototype for the **Far Cry 2** campaign (Steam, version 1.03, Dunia engine).
 It is a `dinput8.dll` proxy that you drop into a **test copy** of the game: the joiner loads the
 host's save, the two games connect over a Steam relay, and each player sees the other as an
 animated avatar in the same world. It is **not** a finished mod: see the status below and the
-[open issues](https://github.com/HitchLangley/fc2-coop-probe/issues).
+[open issues](https://github.com/HitchLangley/far-cry-2-campaign-coop/issues).
 
 Maintained by [HitchLangley](https://github.com/HitchLangley). Started from
 [MortyRei/fc2-coop-probe](https://github.com/MortyRei/fc2-coop-probe) (initial import, MIT);
@@ -26,7 +26,7 @@ over Steam. The newest work (enemies, NPC fights) has not been run on two PCs ye
 | Enemies attacking the joiner | Experiment, off by default (`avai 1` on the host, needs a patched entity library): host NPCs shoot the joiner and the hits take the joiner's health |
 | Not synced yet | Missions and story, pickups and other world state, death and revive, alarms at outposts |
 
-Known problems are tracked in [Issues](https://github.com/HitchLangley/fc2-coop-probe/issues).
+Known problems are tracked in [Issues](https://github.com/HitchLangley/far-cry-2-campaign-coop/issues).
 
 ## What has been built
 
@@ -175,7 +175,7 @@ heading code (the avatar stays at 0 degrees).
 
 ## Known limits
 
-See [Issues](https://github.com/HitchLangley/fc2-coop-probe/issues) for the current list. Direct UDP has no NAT traversal (use the
+See [Issues](https://github.com/HitchLangley/far-cry-2-campaign-coop/issues) for the current list. Direct UDP has no NAT traversal (use the
 Steam relay), and every address in `src/probe.c` is for this exact `Dunia.dll` build only.
 
 ## License
