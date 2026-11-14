@@ -10,6 +10,10 @@ Maintained by [HitchLangley](https://github.com/HitchLangley). Started from
 [MortyRei/fc2-coop-probe](https://github.com/MortyRei/fc2-coop-probe) (initial import, MIT);
 everything after that is developed here, on the `main` branch.
 
+<p align="center"><img src="docs/progress.svg" width="840" alt="Progress estimate: 38% overall; joining 85%, partner avatar 75%, player hits 80%, vehicles 60%, NPCs on the joiner 55%, enemies attack the joiner 30%, world state 10%, missions 0%. 51 h of AI-assisted development, 610 game test runs, 87 commits."></p>
+
+The percentages are the maintainer's estimates (missions and world state weigh more in the overall figure); redraw with `python tools/make_progress_svg.py`.
+
 ## Status (November 2026)
 
 Tested with two copies of the game on one PC; items marked "two PCs" were also run between two PCs
