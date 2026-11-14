@@ -173,6 +173,19 @@ the ~2.5 minutes it runs. Exit code 0 = pass, 1 = a check failed, 2 = setup prob
 B's own player was dragged 16 m); `avatar heading follows A` fails on a probe without the
 heading code (the avatar stays at 0 degrees).
 
+## Time spent
+
+Counted on 2026-11-14 from the development machine's own records (session transcripts, probe logs, git):
+
+| What | Amount |
+|---|---|
+| Period | 19 October 2026 (initial import) to 14 November 2026; work sessions on 17 days from 24 October |
+| AI-assisted development (Claude Code: reading the engine in Ghidra, writing and building the probe, analysing logs, running tests) | about 51 hours of active session time (46-56 h depending on how short a pause still counts as work), 557 messages from the maintainer, about 6,300 tool calls |
+| Game test runs | 610 runs of the two test copies, 63 hours of game time in total (both copies counted) |
+| Commits | 87 |
+
+Active time is the sum of gaps of up to 10 minutes between session events; parallel sessions count once. Time spent
+playing and testing by hand outside the sessions is not included.
 ## Known limits
 
 See [Issues](https://github.com/HitchLangley/far-cry-2-campaign-coop/issues) for the current list. Direct UDP has no NAT traversal (use the
