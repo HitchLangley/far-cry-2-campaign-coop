@@ -571,6 +571,9 @@ static int g_avai = 0, g_avai_missing;  /* avai 0|1 (experiment, off): on the ho
 static int g_cflog;                  /* cflog 0|1: ceasefire research log (cf_tick) */
 static int g_agentlist = 1, g_agentcmp;  /* agentlist 0|1: NPCs from the game's agent list (agent_list_walk); 2: compare once with a memory scan */
 static double g_scanms = 2.0;         /* scanms <ms>: time budget per frame of the NPC / vehicle memory scans (0 = bytes only) */
+static void br_start(int port);
+static int g_acstream;               /* acstream 0|1: animcheck probe stream (ac_tick) */
+static FILE *g_acf;
 static int g_perf = 1;                /* perf 0|1: frame timing log (perf_frame) */
 static int g_cfav;                   /* cfav 0|1 (experiment): the avatar loses the ceasefire protection while the host's town is alarmed */
 static int g_npchitsrc = 1;          /* npchitsrc 0|1: the joiner's hits reach the host NPC as hits by the host's player (its AI ignores the avatar) */
@@ -1790,6 +1793,10 @@ static void native_cmd(const char *ln)
 
     } else if (sscanf(ln, "scanms %d", &n) == 1) {
         g_scanms = n; logf_("scanms %d", n);
+    } else if (sscanf(ln, "bridge %d", &n) == 1) {
+        br_start(n);
+    } else if (sscanf(ln, "acstream %d", &n) == 1) {
+        g_acstream = n; if (!n && g_acf) { fclose(g_acf); g_acf = NULL; } logf_("acstream %d", n);
     } else if (sscanf(ln, "perf %d", &n) == 1) {
         g_perf = n; logf_("perf %d", n);
     } else if (sscanf(ln, "cfav %d", &n) == 1) {
@@ -6101,6 +6108,181 @@ static void door_tick(DWORD now)
     if (g_doorsync && g_door_seq && now - g_door_t < 250 && now - g_door_sent_t >= 100) { door_send(); g_door_sent_t = now; }
 }
 
+/* acstream 0|1: animcheck probe stream (coop-anything tools/animcheck, FORMAT.md) into bin\coop_anim.jsonl, 20 Hz:
+ * our player, the other player's avatar and the synced NPCs (host: the ones it sends; joiner: the puppets, under the
+ * host's id so both files use the same ref). rx_ms = GetTickCount, shared by both copies on one PC. No bones and no
+ * animation groups yet (FC2 move state ids have no category table), so pose / tpose / sliding stay off. Read only. */
+static int ac_actor(char *b, int o, int cap, unsigned long long ent, unsigned long long ref, int player, const char *weap)
+{
+    void *hd = NULL;
+    BYTE *obj = ent ? entity_obj(ent, &hd) : NULL;
+    float mx = 0, hp, yaw;
+    unsigned wf = 0;
+    const char *s;
+    if (hd) (*(int *)((BYTE *)hd + 8))--;
+    if (!obj || IsBadReadPtr(obj, 0x70) || o > cap - 400) return o;
+    hp = npc_hp(obj, &mx);
+    yaw = atan2f(*(float *)(obj + 0x34), *(float *)(obj + 0x30));
+    if (weap) for (s = weap; *s; s++) wf = wf * 31u + (unsigned char)*s;
+    o += snprintf(b + o, cap - o, "%s{\"ref\":\"0x%llX\",\"pos\":[%.3f,%.3f,%.3f],\"rot\":[0,0,%.4f],\"cell\":0,\"dead\":%s%s",
+                  b[o - 1] == '[' ? "" : ",", ref, *(float *)(obj + 0x60), *(float *)(obj + 0x64), *(float *)(obj + 0x68), yaw,
+                  hp <= 0 && mx > 0 ? "true" : "false", player == 1 ? ",\"player\":true" : player == 2 ? ",\"avatar\":true" : "");
+    if (weap) o += snprintf(b + o, cap - o, ",\"weapon\":{\"out\":%s,\"form\":\"0x%X\"}", *weap ? "true" : "false", wf);
+    o += snprintf(b + o, cap - o, "}");
+    return o;
+}
+static void ac_tick(DWORD now)
+{
+    static DWORD last;
+    static unsigned frame;
+    char b[16384];
+    int o, i;
+    if (!g_acstream || now - last < 50 || !player_ready(g_net_id)) return;
+    last = now;
+    if (!g_acf) {
+        char path[MAX_PATH];
+        GetModuleFileNameA(g_self, path, MAX_PATH);
+        strcpy(strrchr(path, '\\') + 1, "coop_anim.jsonl");
+        if (!(g_acf = fopen(path, "a"))) { g_acstream = 0; logf_("acstream: cannot open %s", path); return; }
+        logf_("acstream: writing %s (our player %llx, avatar %llx)", path, g_net_id, g_av_id);
+    }
+    o = snprintf(b, sizeof b, "{\"machine\":\"%s\",\"t_ms\":%lu,\"rx_ms\":%lu,\"frame\":%u,\"actors\":[", g_npc_role == 2 ? "client" : "host",
+                 (unsigned long)now, (unsigned long)now, ++frame);
+    o = ac_actor(b, o, sizeof b, g_net_id, g_npc_role == 2 ? 0xB1ull : 0xA1ull, 1, g_tx_weap);   /* both players share an entity id (one save) */
+    if (g_av_id) o = ac_actor(b, o, sizeof b, g_av_id, g_av_id, 2, g_av_weap);
+    if (g_npc_role == 1) for (i = 0; i < g_nh_n; i++) o = ac_actor(b, o, sizeof b, g_nh[i].id, g_nh[i].id, 0, g_nh[i].wname);
+    /* joiner: the puppet's own entity (a copy spawned here has another id), reported under the host's id */
+    if (g_npc_role == 2) for (i = 0; i < g_np_n; i++) if (g_np[i].state == 1)
+        o = ac_actor(b, o, sizeof b, g_np[i].lid ? g_np[i].lid : g_np[i].id, g_np[i].id, 0, g_np[i].wname);
+    if (o < (int)sizeof b - 4) { memcpy(b + o, "]}\n", 4); fputs(b, g_acf); if (frame % 20 == 0) fflush(g_acf); }
+}
+/* bridge <port>: a read-only server for coop-anything tools/inspect (tools/bridge/PROTOCOL.md, version 1): JSON lines
+ * over TCP on 127.0.0.1, methods ping, version, methods and state; everything else answers -32601 (nothing here can
+ * change the game). The main thread builds the state snapshot every 250 ms (br_tick); the socket threads only copy it.
+ * Writes bin\coop_bridge.json with the endpoint. */
+static CRITICAL_SECTION g_br_cs;
+static char g_br_state[8192] = "{}";
+static volatile LONG g_br_frames;
+static volatile DWORD g_br_lastframe;
+static int g_br_port;
+static double g_pf_fps_last;
+static DWORD g_pf_worst_last;
+static void br_send(SOCKET s, const char *t) { int n = (int)strlen(t), k; while (n > 0 && (k = send(s, t, n, 0)) > 0) { t += k; n -= k; } }
+static DWORD WINAPI br_conn(LPVOID arg)
+{
+    SOCKET s = (SOCKET)(ULONG_PTR)arg;
+    char in[8192], out[10240], id[64], meth[48];
+    int have = 0, k;
+    for (;;) {
+        char *nl;
+        if ((k = recv(s, in + have, (int)sizeof in - 1 - have, 0)) <= 0) break;
+        have += k; in[have] = 0;
+        while ((nl = strchr(in, '\n'))) {
+            char *q, *e;
+            *nl = 0;
+            strcpy(id, "null"); meth[0] = 0;
+            if ((q = strstr(in, "\"id\"")) && (q = strchr(q, ':'))) {
+                q++; while (*q == ' ') q++;
+                e = q; if (*e == '"') { e++; while (*e && *e != '"') e++; if (*e) e++; } else while (*e && *e != ',' && *e != '}' && *e != ' ') e++;
+                if (e > q && e - q < (int)sizeof id) { memcpy(id, q, e - q); id[e - q] = 0; }
+            }
+            if ((q = strstr(in, "\"method\"")) && (q = strchr(q + 8, '"'))) {
+                q++; e = strchr(q, '"');
+                if (e && e - q < (int)sizeof meth) { memcpy(meth, q, e - q); meth[e - q] = 0; }
+            }
+            if (in[0] == 0 || in[0] == '\r') { }
+            else if (!strcmp(meth, "ping")) {
+                DWORD age = g_br_lastframe ? GetTickCount() - g_br_lastframe : (DWORD)-1;
+                snprintf(out, sizeof out, "{\"id\":%s,\"result\":{\"pong\":true,\"protocol\":1,\"game\":\"farcry2\",\"pid\":%lu,\"frames\":%ld,\"mainLoopAgeMs\":%ld,\"ready\":%s,\"loadedCount\":%d}}\n",
+                         id, GetCurrentProcessId(), g_br_frames, g_br_lastframe ? (long)age : -1L, player_ready(g_net_id) ? "true" : "false", player_ready(g_net_id) ? 1 : 0);
+                br_send(s, out);
+            } else if (!strcmp(meth, "version")) {
+                snprintf(out, sizeof out, "{\"id\":%s,\"result\":{\"protocol\":1,\"game\":\"farcry2\",\"build\":\"%s\",\"server\":\"fc2-probe-c 1\",\"pid\":%lu}}\n", id, __DATE__, GetCurrentProcessId());
+                br_send(s, out);
+            } else if (!strcmp(meth, "methods")) {
+                snprintf(out, sizeof out, "{\"id\":%s,\"result\":{\"methods\":[\"ping\",\"version\",\"methods\",\"state\"]}}\n", id);
+                br_send(s, out);
+            } else if (!strcmp(meth, "state")) {
+                EnterCriticalSection(&g_br_cs);
+                snprintf(out, sizeof out, "{\"id\":%s,\"result\":%s}\n", id, g_br_state);
+                LeaveCriticalSection(&g_br_cs);
+                br_send(s, out);
+            } else {
+                snprintf(out, sizeof out, "{\"id\":%s,\"error\":{\"code\":-32601,\"message\":\"method not found (this bridge only reads)\"}}\n", id);
+                br_send(s, out);
+            }
+            have -= (int)(nl + 1 - in); memmove(in, nl + 1, have + 1);
+        }
+        if (have >= (int)sizeof in - 1) break;
+    }
+    closesocket(s);
+    return 0;
+}
+static DWORD WINAPI br_listen(LPVOID arg)
+{
+    SOCKET ls = (SOCKET)(ULONG_PTR)arg, s;
+    while ((s = accept(ls, NULL, NULL)) != INVALID_SOCKET) {
+        HANDLE h = CreateThread(NULL, 0, br_conn, (LPVOID)(ULONG_PTR)s, 0, NULL);
+        if (h) CloseHandle(h); else closesocket(s);
+    }
+    return 0;
+}
+static void br_start(int port)
+{
+    WSADATA wd;
+    SOCKET ls;
+    struct sockaddr_in a;
+    char path[MAX_PATH];
+    FILE *f;
+    if (g_br_port) { logf_("bridge: already on port %d", g_br_port); return; }
+    WSAStartup(MAKEWORD(2, 2), &wd);
+    InitializeCriticalSection(&g_br_cs);
+    ls = socket(AF_INET, SOCK_STREAM, IPPROTO_TCP);
+    memset(&a, 0, sizeof a); a.sin_family = AF_INET; a.sin_port = htons((u_short)port); a.sin_addr.s_addr = htonl(INADDR_LOOPBACK);
+    if (ls == INVALID_SOCKET || bind(ls, (struct sockaddr *)&a, sizeof a) || listen(ls, 4)) { logf_("bridge: cannot listen on 127.0.0.1:%d (%d)", port, WSAGetLastError()); if (ls != INVALID_SOCKET) closesocket(ls); return; }
+    g_br_port = port;
+    CloseHandle(CreateThread(NULL, 0, br_listen, (LPVOID)(ULONG_PTR)ls, 0, NULL));
+    GetModuleFileNameA(g_self, path, MAX_PATH);
+    strcpy(strrchr(path, '\\') + 1, "coop_bridge.json");
+    if ((f = fopen(path, "w"))) { fprintf(f, "{\"protocol\": 1, \"game\": \"farcry2\", \"pid\": %lu, \"endpoints\": [\"tcp://127.0.0.1:%d\"]}\n", GetCurrentProcessId(), port); fclose(f); }
+    logf_("bridge: read-only inspect server on tcp://127.0.0.1:%d", port);
+}
+static int br_ent(char *b, int o, int cap, const char *name, unsigned long long id, const char *weap)
+{
+    void *hd = NULL;
+    BYTE *obj = id ? entity_obj(id, &hd) : NULL;
+    float mx = 0, hp = 0;
+    if (hd) (*(int *)((BYTE *)hd + 8))--;
+    if (obj && !IsBadReadPtr(obj, 0x70)) hp = npc_hp(obj, &mx);
+    if (!obj || IsBadReadPtr(obj, 0x70)) return o + snprintf(b + o, cap - o, "\"%s\":null,", name);
+    return o + snprintf(b + o, cap - o, "\"%s\":{\"id\":\"0x%llX\",\"pos\":[%.1f,%.1f,%.1f],\"hp\":%.0f,\"weapon\":\"%s\"},", name, id,
+                        *(float *)(obj + 0x60), *(float *)(obj + 0x64), *(float *)(obj + 0x68), hp, weap ? weap : "");
+}
+static void br_tick(DWORD now)
+{
+    static DWORD last;
+    char b[8192];
+    int o = 0, i, pup = 0;
+    BYTE *g, *s;
+    int alarm = -1;
+    InterlockedIncrement(&g_br_frames); g_br_lastframe = now;
+    if (!g_br_port || now - last < 250) return;
+    last = now;
+    g = *(BYTE **)(g_base + 0x1607408);
+    s = g && !IsBadReadPtr(g + 0xC, 4) ? *(BYTE **)(g + 0xC) : NULL;
+    if (s && !IsBadReadPtr(s + 0x198, 1)) alarm = s[0x198];
+    for (i = 0; i < g_np_n; i++) if (g_np[i].state == 1) pup++;
+    o += snprintf(b + o, sizeof b - o, "{\"role\":\"%s\",", g_npc_role == 1 ? "host" : g_npc_role == 2 ? "client" : "none");
+    o = br_ent(b, o, sizeof b, "player", g_net_id, g_tx_weap);
+    o = br_ent(b, o, sizeof b, "avatar", g_av_id, g_av_weap);
+    o += snprintf(b + o, sizeof b - o, "\"peer\":{\"pos\":[%.1f,%.1f,%.1f],\"weapon\":\"%s\",\"seq\":%u},", g_remote.pos[0], g_remote.pos[1], g_remote.pos[2], g_rx_weap, g_remote.seq);
+    o += snprintf(b + o, sizeof b - o, "\"net\":{\"tx\":%u,\"rx\":%u,\"drop\":%u,\"age_ms\":%ld},", g_net_tx, g_net_rx, g_net_drop, g_net_lastrx ? (long)(now - g_net_lastrx) : -1L);
+    o += snprintf(b + o, sizeof b - o, "\"npc\":{\"host_sends\":%d,\"host_count\":%d,\"puppets\":%d,\"max\":%d},", g_nh_n, (int)g_np_hostcount, pup, NPC_MAX);
+    o += snprintf(b + o, sizeof b - o, "\"town\":{\"alarm\":%d},\"perf\":{\"fps\":%.0f,\"worst_ms\":%lu}}", alarm, g_pf_fps_last, (unsigned long)g_pf_worst_last);
+    EnterCriticalSection(&g_br_cs);
+    memcpy(g_br_state, b, (size_t)o + 1);
+    LeaveCriticalSection(&g_br_cs);
+}
 /* perf (on by default, `perf 0` off): time of each probe tick per frame (QueryPerformanceCounter) and the gap between
  * frames; every 10 s one line with the frame count, frames over 50 / 150 ms, the worst gap, and the probe's own worst
  * and average time per frame per tick; a gap over 300 ms is logged at once with what the probe spent in that frame */
@@ -6140,6 +6322,7 @@ static void perf_frame(DWORD now)
         top[o] = 0;
         logf_("perf: %u frames in %lu ms (%.0f fps), >50 ms %u, >150 ms %u, worst %lu ms; probe max/avg ms:%s", g_pf_n,
               (unsigned long)(now - g_pf_report), g_pf_n * 1000.0 / (now - g_pf_report), g_pf_50, g_pf_150, (unsigned long)g_pf_worst, o ? top : " all small");
+        g_pf_fps_last = g_pf_n * 1000.0 / (now - g_pf_report); g_pf_worst_last = g_pf_worst;
         g_pf_n = g_pf_50 = g_pf_150 = 0; g_pf_worst = 0; g_pf_report = now;
         for (k = 0; k < 13; k++) g_pt_max[k] = g_pt_sum[k] = 0;
     }
@@ -6375,6 +6558,8 @@ static void net_tick(void)
     PT(10, veh_tick(now));
     PT(11, sig_tick(now));
     PT(12, door_tick(now));
+    ac_tick(now);
+    br_tick(now);
     /* send at 20 Hz */
     if ((g_bodymat || g_net_id) && now - g_net_lastsend >= 50 && player_ready(g_net_id)) {
         NetPktX4 q4;

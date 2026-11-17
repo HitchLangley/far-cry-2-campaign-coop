@@ -59,3 +59,14 @@ host's `coop_auto.txt` (`worldsync join;...` for the joiner); `start-coop` adds 
 | `vcall`, `vcallp`, `vcall1`, `xhook`, `dumpd` | calls and hooks for reverse engineering only |
 
 The full list is the command parser in `src/probe.c` (function `run_native`).
+
+## Sync test tools and diagnostics
+
+| Command | What |
+|---|---|
+| `acstream 0\|1` | write `bin\coop_anim.jsonl` for coop-anything `animcheck` ([SYNC-TOOLS](SYNC-TOOLS.md)) |
+| `bridge <port>` | read-only server for coop-anything `inspect` on 127.0.0.1 |
+| `perf 0\|1` | frame times and the probe's share every 10 s (on by default) |
+| `scanms <ms>` | time budget per frame of the remaining memory scans |
+| `agentlist 0\|1\|2` | NPCs from the game's agent list (default), the memory scan, or compare both once |
+| `cflog 0\|1`, `cfdump`, `cfav 0\|1` | town ceasefire research: log the alarm and agents' zone state, dump agents, take the avatar out of the ceasefire zone while the town is alarmed (experiment) |

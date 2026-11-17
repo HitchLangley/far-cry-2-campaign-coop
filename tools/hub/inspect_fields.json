@@ -1,0 +1,30 @@
+{
+  "_notes": "Far Cry 2 probe: field list for coop-anything tools/inspect. The probe's read-only bridge (command `bridge <port>`) answers ping, version, methods and state; state is one JSON object, sections are ignored.",
+  "name": "farcry2",
+  "eval_allow": [],
+  "read_methods": [],
+  "fields": [
+    {"label": "role",          "source": "state", "section": "role",   "path": "role"},
+    {"label": "player hp",     "source": "state", "section": "player", "path": "player.hp", "format": "{:g}"},
+    {"label": "player pos",    "source": "state", "section": "player", "path": "player.pos", "format": "{0:.1f} {1:.1f} {2:.1f}"},
+    {"label": "player weapon", "source": "state", "section": "player", "path": "player.weapon"},
+    {"label": "avatar pos",    "source": "state", "section": "avatar", "path": "avatar.pos", "format": "{0:.1f} {1:.1f} {2:.1f}"},
+    {"label": "avatar weapon", "source": "state", "section": "avatar", "path": "avatar.weapon"},
+    {"label": "peer weapon",   "source": "state", "section": "peer",   "path": "peer.weapon"},
+    {"label": "rx",            "source": "state", "section": "net",    "path": "net.rx"},
+    {"label": "link age ms",   "source": "state", "section": "net",    "path": "net.age_ms"},
+    {"label": "dropped",       "source": "state", "section": "net",    "path": "net.drop"},
+    {"label": "NPCs sent",     "source": "state", "section": "npc",    "path": "npc.host_sends"},
+    {"label": "NPCs in packet","source": "state", "section": "npc",    "path": "npc.host_count"},
+    {"label": "puppets",       "source": "state", "section": "npc",    "path": "npc.puppets"},
+    {"label": "town alarm",    "source": "state", "section": "town",   "path": "town.alarm"},
+    {"label": "fps",           "source": "state", "section": "perf",   "path": "perf.fps"},
+    {"label": "worst frame ms","source": "state", "section": "perf",   "path": "perf.worst_ms"}
+  ],
+  "problems": [
+    {"field": "link age ms",    "op": ">",  "value": 1000, "say": "{copy}: nothing from the other copy for {value} ms"},
+    {"field": "NPCs sent",      "op": ">=", "value": 24,   "say": "{copy}: the NPC limit (24) is reached, more NPCs are not synced"},
+    {"field": "worst frame ms", "op": ">",  "value": 100,  "say": "{copy}: a {value} ms frame in the last 10 s"},
+    {"differs": "town alarm",   "say": "the town alarm differs between the copies: {values}"}
+  ]
+}

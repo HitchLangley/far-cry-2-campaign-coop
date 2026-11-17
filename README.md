@@ -132,6 +132,7 @@ or run `build.bat`. Copy `dinput8.dll` into the `bin` folder of the test copy (n
 
 - [How it works](docs/HOW-IT-WORKS.md): who runs what, the avatar, hits, NPCs, vehicles, menu and Steam, the packets.
 - [Commands and control files](docs/COMMANDS.md).
+- [Checking sync with the coop-anything tools](docs/SYNC-TOOLS.md): animcheck, inspect and chaos with the probe.
 - [Manual setup](docs/MANUAL-SETUP.md): byte patches by hand, the Lua and command files, a direct link, the relay alone.
 - Research notes and dated evidence: the Far Cry 2 write-up in
   [coop-anything](https://github.com/cranebeaker/coop-anything/tree/main/games/far-cry-2).
