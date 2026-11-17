@@ -591,6 +591,8 @@ static int g_agentlist = 1, g_agentcmp;  /* agentlist 0|1: NPCs from the game's 
 static double g_scanms = 2.0;         /* scanms <ms>: time budget per frame of the NPC / vehicle memory scans (0 = bytes only) */
 static void br_start(int port);
 static int threat_post(float rad);
+static void tgt_scan(void);
+static int tgt_swap(void);
 static float npc_hp(BYTE *obj, float *hpmax);
 static int g_acstream;               /* acstream 0|1: animcheck probe stream (ac_tick) */
 static FILE *g_acf;
@@ -1819,6 +1821,10 @@ static void native_cmd(const char *ln)
         g_acstream = n; if (!n && g_acf) { fclose(g_acf); g_acf = NULL; } logf_("acstream %d", n);
     } else if (sscanf(ln, "perf %d", &n) == 1) {
         g_perf = n; logf_("perf %d", n);
+    } else if (!strncmp(ln, "tgtswap", 7)) {
+        logf_("tgtswap: %d threat entries now point at the avatar", tgt_swap());
+    } else if (!strncmp(ln, "tgtscan", 7)) {
+        tgt_scan();
     } else if (sscanf(ln, "threat %d", &n) == 1) {
         logf_("threat: combat event with the avatar as threat posted to %d NPCs within %d m", threat_post((float)n), n);
     } else if (!strncmp(ln, "almsend", 7)) {
@@ -6468,6 +6474,99 @@ static int threat_post(float rad)
         ((post_t)(g_base + 0x327130))(*(void **)(ag + 0x6C), ev);
         if (--(*(int *)(ev + 4)) == 0) ((void (__attribute__((thiscall)) *)(void *))(*(void ***)ev)[1])(ev);
         n++;
+    }
+    return n;
+}
+/* tgtscan (research): for every host NPC agent in a combat state (+0x274 2..5), list the offsets (0..0x1000 of the
+ * agent, and one level down through pointers in the first 0x300 bytes, 0x200 each) that hold our player's entity id
+ * (low dword), its entity object, its pawn component or the global player agent [D+1652108]; the same for the avatar.
+ * Looking for where an NPC keeps its current target. */
+static void tgt_scan(void)
+{
+    typedef void *(__attribute__((thiscall)) *gc_t)(void *ent, void *key);
+    void *h1 = NULL, *h2 = NULL;
+    BYTE *po = entity_obj(g_net_id, &h1), *ao = g_av_id ? entity_obj(g_av_id, &h2) : NULL;
+    DWORD want[8], *hits;
+    const char *nm[8] = { "player id", "player obj", "player pawn", "player agent", "avatar id", "avatar obj", "avatar pawn", "avatar agent" };
+    int i, k, nw = 8;
+    if (h1) (*(int *)((BYTE *)h1 + 8))--;
+    if (h2) (*(int *)((BYTE *)h2 + 8))--;
+    want[0] = (DWORD)g_net_id; want[1] = (DWORD)po; want[2] = po ? (DWORD)((gc_t)(g_base + 0x4E2CC0))(po, (void *)(g_base + 0xFDE39C)) : 1;
+    want[3] = *(DWORD *)(g_base + 0x1652108);
+    want[4] = (DWORD)g_av_id; want[5] = (DWORD)ao; want[6] = ao ? (DWORD)((gc_t)(g_base + 0x4E2CC0))(ao, (void *)(g_base + 0xFDE39C)) : 1;
+    { BYTE *c2 = ao ? ((gc_t)(g_base + 0x4E2CC0))(ao, (void *)(g_base + 0xFE4090)) : NULL; want[7] = c2 ? *(DWORD *)(c2 + 0x14) : 1; }
+    (void)hits;
+    for (i = 0; i < g_nh_n; i++) {
+        void *hd = NULL;
+        BYTE *o = entity_obj(g_nh[i].id, &hd), *cp, *ag;
+        char line[1400];
+        int len = 0, st;
+        if (hd) (*(int *)((BYTE *)hd + 8))--;
+        if (!o) continue;
+        cp = ((gc_t)(g_base + 0x4E2CC0))(o, (void *)(g_base + 0xFE4090));
+        ag = cp ? *(BYTE **)(cp + 0x14) : NULL;
+        if (!ag || IsBadReadPtr(ag, 0x1000)) continue;
+        st = *(int *)(ag + 0x274);
+        if (st < 2 || st > 5) continue;
+        len = snprintf(line, sizeof line, "tgtscan %llu state %d:", g_nh[i].id, st);
+        for (k = 0; k + 4 <= 0x1000 && len < (int)sizeof line - 60; k += 4) {
+            DWORD v = *(DWORD *)(ag + k);
+            int w;
+            for (w = 0; w < nw; w++) if (v == want[w] && v > 1 && (w % 4 != 0 || (k + 8 <= 0x1000 && *(DWORD *)(ag + k + 4) == (DWORD)((w ? g_av_id : g_net_id) >> 32)))) len += snprintf(line + len, sizeof line - len, " +%X=%s", k, nm[w]);
+            if (k < 0x300 && v > 0x10000 && !IsBadReadPtr((void *)v, 0x200)) {
+                int q;
+                for (q = 0; q + 4 <= 0x200 && len < (int)sizeof line - 60; q += 4) {
+                    DWORD v2 = *(DWORD *)((BYTE *)v + q);
+                    for (w = 0; w < nw; w++) if (v2 == want[w] && v2 > 1 && (w % 4 != 0 || (q + 8 <= 0x200 && *(DWORD *)((BYTE *)v + q + 4) == (DWORD)((w ? g_av_id : g_net_id) >> 32)))) len += snprintf(line + len, sizeof line - len, " +%X->+%X=%s", k, q, nm[w]);
+                }
+            }
+        }
+        {
+            int offs[4] = { 0x68, 0x214, 0x220, 0xD0 }, z;
+            for (z = 0; z < 4 && len < (int)sizeof line - 40; z++) {
+                BYTE *sub = *(BYTE **)(ag + offs[z]);
+                if (sub && !IsBadReadPtr(sub, 8)) len += snprintf(line + len, sizeof line - len, " [+%X vt %X]", offs[z], *(DWORD *)sub - (DWORD)g_base);
+            }
+        }
+        logf_("%s", line);
+    }
+}
+/* tgtswap (experiment): in host NPC agents fighting (+0x274 2..5) that are nearer the avatar than our player, the
+ * nodes at agent+0x214 / +0x220 / +0x68->+0x70 that hold our player's agent at +0x30 (found by tgtscan: what looks
+ * like the NPC's threat entry) get the avatar's agent instead. Returns how many entries were changed. */
+static int tgt_swap(void)
+{
+    typedef void *(__attribute__((thiscall)) *gc_t)(void *ent, void *key);
+    void *h1 = NULL, *h2 = NULL;
+    BYTE *po = entity_obj(g_net_id, &h1), *ao = g_av_id ? entity_obj(g_av_id, &h2) : NULL, *c2, *aag;
+    DWORD pag = *(DWORD *)(g_base + 0x1652108);
+    int i, n = 0;
+    if (h1) (*(int *)((BYTE *)h1 + 8))--;
+    if (h2) (*(int *)((BYTE *)h2 + 8))--;
+    if (!po || !ao || !pag) return -1;
+    c2 = ((gc_t)(g_base + 0x4E2CC0))(ao, (void *)(g_base + 0xFE4090));
+    aag = c2 ? *(BYTE **)(c2 + 0x14) : NULL;
+    if (!aag) return -1;
+    for (i = 0; i < g_nh_n; i++) {
+        void *hd = NULL;
+        BYTE *o = entity_obj(g_nh[i].id, &hd), *cp, *ag;
+        float da, db;
+        int st, z;
+        if (hd) (*(int *)((BYTE *)hd + 8))--;
+        if (!o) continue;
+        cp = ((gc_t)(g_base + 0x4E2CC0))(o, (void *)(g_base + 0xFE4090));
+        ag = cp ? *(BYTE **)(cp + 0x14) : NULL;
+        if (!ag || IsBadReadPtr(ag, 0x300)) continue;
+        st = *(int *)(ag + 0x274);
+        if (st < 2 || st > 5) continue;
+        da = (*(float *)(o + 0x60) - *(float *)(po + 0x60)) * (*(float *)(o + 0x60) - *(float *)(po + 0x60)) + (*(float *)(o + 0x64) - *(float *)(po + 0x64)) * (*(float *)(o + 0x64) - *(float *)(po + 0x64));
+        db = (*(float *)(o + 0x60) - *(float *)(ao + 0x60)) * (*(float *)(o + 0x60) - *(float *)(ao + 0x60)) + (*(float *)(o + 0x64) - *(float *)(ao + 0x64)) * (*(float *)(o + 0x64) - *(float *)(ao + 0x64));
+        if (db >= da) continue;
+        for (z = 0; z < 3; z++) {
+            BYTE *node = z == 0 ? *(BYTE **)(ag + 0x214) : z == 1 ? *(BYTE **)(ag + 0x220) : *(BYTE **)(ag + 0x68);
+            int fo = z == 2 ? 0x70 : 0x30;
+            if (node && !IsBadReadPtr(node + fo, 4) && *(DWORD *)(node + fo) == pag) { *(BYTE **)(node + fo) = aag; n++; }
+        }
     }
     return n;
 }
