@@ -575,6 +575,7 @@ static int g_alm_force;               /* almsend (test): send ALM1 as if our tow
 static int g_agentlist = 1, g_agentcmp;  /* agentlist 0|1: NPCs from the game's agent list (agent_list_walk); 2: compare once with a memory scan */
 static double g_scanms = 2.0;         /* scanms <ms>: time budget per frame of the NPC / vehicle memory scans (0 = bytes only) */
 static void br_start(int port);
+static int threat_post(float rad);
 static float npc_hp(BYTE *obj, float *hpmax);
 static int g_acstream;               /* acstream 0|1: animcheck probe stream (ac_tick) */
 static FILE *g_acf;
@@ -1803,6 +1804,8 @@ static void native_cmd(const char *ln)
         g_acstream = n; if (!n && g_acf) { fclose(g_acf); g_acf = NULL; } logf_("acstream %d", n);
     } else if (sscanf(ln, "perf %d", &n) == 1) {
         g_perf = n; logf_("perf %d", n);
+    } else if (sscanf(ln, "threat %d", &n) == 1) {
+        logf_("threat: combat event with the avatar as threat posted to %d NPCs within %d m", threat_post((float)n), n);
     } else if (!strncmp(ln, "almsend", 7)) {
         g_alm_force = 1; logf_("almsend: ALM1 on the next tick (test)");
     } else if (sscanf(ln, "almsync %d", &n) == 1) {
@@ -3070,9 +3073,16 @@ static void npc_hit_apply(const NpcHitPkt *nk)
             if ((f = fopen(path, "wb"))) { fwrite(&nk->h, sizeof nk->h, 1, f); fclose(f); }
         }
         g_alm_tmpl = nk->h; g_alm_have = 1;
-        st_deliver(&nk->h, obj, *(void ***)obj == &g_st_vt[2][1] ? g_st_orig[2] : (*(void ***)obj)[0x20 / 4], g_npchitsrc ? g_net_id : g_av_id);
+        /* npchitsrc 2: while the host's town is calm the hit comes from our player (that raises the alarm: hits from the
+         * avatar left the town calm); once it is alarmed, from the avatar, so the NPC turns on the one who shoots it */
+        unsigned long long src = g_npchitsrc == 1 ? g_net_id : g_av_id;
+        if (g_npchitsrc == 2) {
+            BYTE *g = *(BYTE **)(g_base + 0x1607408), *s = g && !IsBadReadPtr(g + 0xC, 4) ? *(BYTE **)(g + 0xC) : NULL;
+            src = s && !IsBadReadPtr(s + 0x198, 1) && s[0x198] ? g_av_id : g_net_id;
+        }
+        st_deliver(&nk->h, obj, *(void ***)obj == &g_st_vt[2][1] ? g_st_orig[2] : (*(void ***)obj)[0x20 / 4], src);
         after = npc_hp(obj, &mx);
-        if (++g_nhit_rx <= 400) logf_("npc hit %u: the joiner hit NPC %llu (type %d, amount %d, part %08x) -> applied, hp %.0f -> %.0f of %.0f", nk->h.seq, nk->npc, nk->h.type, nk->h.amount, nk->h.part, before, after, mx);
+        if (++g_nhit_rx <= 400) logf_("npc hit %u: the joiner hit NPC %llu (type %d, amount %d, part %08x) -> applied as %s, hp %.0f -> %.0f of %.0f", nk->h.seq, nk->npc, nk->h.type, nk->h.amount, nk->h.part, src == g_av_id ? "the avatar" : "our player", before, after, mx);
     }
 }
 
@@ -6363,6 +6373,49 @@ static void br_tick(DWORD now)
     EnterCriticalSection(&g_br_cs);
     memcpy(g_br_state, b, (size_t)o + 1);
     LeaveCriticalSection(&g_br_cs);
+}
+/* threat (experiment): post the social-region combat event that ForceSocialRegionToCombat posts for the player
+ * (FUN_10961840 mode 0: event ctor FUN_10a0b320, 0x58 bytes; +0x10/+0x1c the threat's position, +0x28 = 1,
+ * +0x50 = 10, +0x2C = the agent's +0xC; queue = agent +0x6C, FUN_10327130), but with the avatar's position and its
+ * entity id at +0x30/+0x34, which the region hands to each NPC as the entity to react to (FUN_10970e20 ->
+ * FUN_1096b100). Sent to every NPC agent within `rad` m of the avatar. Returns how many got it. */
+static int threat_post(float rad)
+{
+    typedef void *(__cdecl *alloc_t)(unsigned size, unsigned flags);
+    typedef void *(__attribute__((thiscall)) *ctor_t)(void *ev);
+    typedef void (__attribute__((thiscall)) *post_t)(void *queue, void *ev);
+    typedef void *(__attribute__((thiscall)) *gc_t)(void *ent, void *key);
+    void *ha = NULL;
+    BYTE *av = g_av_id ? entity_obj(g_av_id, &ha) : NULL;
+    int i, n = 0;
+    if (ha) (*(int *)((BYTE *)ha + 8))--;
+    if (!av || g_npc_role != 1) return -1;
+    for (i = 0; i < g_nh_n; i++) {
+        void *hd = NULL;
+        BYTE *o = entity_obj(g_nh[i].id, &hd), *cp, *ag, *ev;
+        float mx = 0, dx, dy;
+        if (hd) (*(int *)((BYTE *)hd + 8))--;
+        if (!o || npc_hp(o, &mx) <= 0) continue;
+        dx = *(float *)(o + 0x60) - *(float *)(av + 0x60); dy = *(float *)(o + 0x64) - *(float *)(av + 0x64);
+        if (dx * dx + dy * dy > rad * rad) continue;
+        cp = ((gc_t)(g_base + 0x4E2CC0))(o, (void *)(g_base + 0xFE4090));
+        ag = cp ? *(BYTE **)(cp + 0x14) : NULL;
+        if (!ag || IsBadReadPtr(ag + 0x6C, 4) || !*(void **)(ag + 0x6C)) continue;
+        ev = ((alloc_t)(g_base + 0x228F30))(0x58, 0);
+        if (!ev) continue;
+        ((ctor_t)(g_base + 0xA0B320))(ev);
+        memcpy(ev + 0x10, av + 0x60, 12);
+        memcpy(ev + 0x1C, av + 0x60, 12);
+        ev[0x28] = 1;
+        *(int *)(ev + 0x50) = 10;
+        *(int *)(ev + 0x2C) = *(int *)(ag + 0xC);
+        *(unsigned long long *)(ev + 0x30) = g_av_id;
+        (*(int *)(ev + 4)) += 2;      /* ours + the argument's, which the queue releases */
+        ((post_t)(g_base + 0x327130))(*(void **)(ag + 0x6C), ev);
+        if (--(*(int *)(ev + 4)) == 0) ((void (__attribute__((thiscall)) *)(void *))(*(void ***)ev)[1])(ev);
+        n++;
+    }
+    return n;
 }
 /* perf (on by default, `perf 0` off): time of each probe tick per frame (QueryPerformanceCounter) and the gap between
  * frames; every 10 s one line with the frame count, frames over 50 / 150 ms, the worst gap, and the probe's own worst
