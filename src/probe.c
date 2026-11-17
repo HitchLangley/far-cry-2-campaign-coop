@@ -593,6 +593,10 @@ static void br_start(int port);
 static int threat_post(float rad);
 static void tgt_scan(void);
 static int tgt_swap(void);
+static void tgt_wbp(int nmax);
+static void tgtav_tick(void);
+static void tgt_why(void);
+static int g_tgtav = 1;               /* tgtav 0|1: host NPCs nearer the joiner's avatar take it as "the player" in their threat scan */
 static float npc_hp(BYTE *obj, float *hpmax);
 static int g_acstream;               /* acstream 0|1: animcheck probe stream (ac_tick) */
 static FILE *g_acf;
@@ -1821,6 +1825,12 @@ static void native_cmd(const char *ln)
         g_acstream = n; if (!n && g_acf) { fclose(g_acf); g_acf = NULL; } logf_("acstream %d", n);
     } else if (sscanf(ln, "perf %d", &n) == 1) {
         g_perf = n; logf_("perf %d", n);
+    } else if (!strncmp(ln, "tgtwhy", 6)) {
+        tgt_why();
+    } else if (sscanf(ln, "tgtav %d", &n) == 1) {
+        g_tgtav = n; logf_("tgtav %d", n);
+    } else if (sscanf(ln, "tgtwbp %d", &n) == 1) {
+        tgt_wbp(n);
     } else if (!strncmp(ln, "tgtswap", 7)) {
         logf_("tgtswap: %d threat entries now point at the avatar", tgt_swap());
     } else if (!strncmp(ln, "tgtscan", 7)) {
@@ -3204,6 +3214,22 @@ static void cf_tick(DWORD now)
             if (s[0x198] != was) logf_("cfav: host town alarm %d -> %d, avatar zone flags now %02x", was, s[0x198], ag[0x99C]);
             was = s[0x198];
         }
+        /* cfav 2 (experiment): the host's NPC agents leave the ceasefire zone too while the town is alarmed, so they
+         * fight as at a guard post outside towns (where they did shoot the avatar) */
+        if (g_cfav >= 2 && s[0x198]) {
+            static DWORD lastlog;
+            int k, nc = 0;
+            for (k = 0; k < g_nh_n; k++) {
+                void *h3 = NULL;
+                BYTE *o3 = entity_obj(g_nh[k].id, &h3), *c3, *a3;
+                if (h3) (*(int *)((BYTE *)h3 + 8))--;
+                if (!o3 || !(c3 = ((gc0_t)(g_base + 0x4E2CC0))(o3, (void *)(g_base + 0xFE4090)))) continue;
+                a3 = *(BYTE **)(c3 + 0x14);
+                if (!a3 || IsBadReadPtr(a3 + 0x998, 8)) continue;
+                if (*(int *)(a3 + 0x998) || (a3[0x99C] & 2)) { *(int *)(a3 + 0x998) = 0; a3[0x99C] &= ~2; nc++; }
+            }
+            if (nc && now - lastlog > 2000) { lastlog = now; logf_("cfav 2: %d NPC agents taken out of the ceasefire zone", nc); }
+        }
     }
     /* almsync: B's ceasefire breaks at B's own shot (even a miss); the host only sees hits, and a first hit that kills
      * puts no NPC into combat there, so the host's town stayed calm 6-24 s. The joiner sends ALM1 when its alarm rises;
@@ -4227,7 +4253,7 @@ static void npc_flags_pre(BYTE *mb)
 static volatile LONG g_wbp_hits;
 static LONG g_wbp_read, g_wbp_max;
 static DWORD g_wbp_addr;
-static struct { DWORD eip, tid, sp[32]; float v; } g_wbp_ring[64];
+static struct { DWORD eip, tid, sp[32]; float v; DWORD u; } g_wbp_ring[64];
 static LONG WINAPI wbp_veh(EXCEPTION_POINTERS *ep)
 {
     CONTEXT *c = ep->ContextRecord;
@@ -4240,7 +4266,7 @@ static LONG WINAPI wbp_veh(EXCEPTION_POINTERS *ep)
         c->Dr6 = 0;
         if (i < 64) {
             int k;
-            g_wbp_ring[i].eip = c->Eip; g_wbp_ring[i].tid = GetCurrentThreadId(); g_wbp_ring[i].v = *(float *)g_wbp_addr;
+            g_wbp_ring[i].eip = c->Eip; g_wbp_ring[i].tid = GetCurrentThreadId(); g_wbp_ring[i].v = *(float *)g_wbp_addr; g_wbp_ring[i].u = *(DWORD *)g_wbp_addr;
             for (k = 0; k < 32; k++) g_wbp_ring[i].sp[k] = IsBadReadPtr((DWORD *)c->Esp + k, 4) ? 0 : ((DWORD *)c->Esp)[k];
         }
         if (i + 1 >= g_wbp_max) c->Dr7 = 0;
@@ -4296,8 +4322,8 @@ static void wbp_tick(void)
         DWORD *q = g_wbp_ring[g_wbp_read].sp;
         for (k = 0; k < 32; k++) if (q[k] > (DWORD)g_base + 0x1000 && q[k] < (DWORD)g_base + 0xE00000) o += snprintf(s + o, sizeof s - o, " %lx", (unsigned long)(q[k] - (DWORD)g_base));
         s[o] = 0;
-        logf_("wbp hit: T%lu eip %s%lx row0x %.3f, stack%s", (unsigned long)g_wbp_ring[g_wbp_read].tid, g_wbp_ring[g_wbp_read].eip > (DWORD)g_base && g_wbp_ring[g_wbp_read].eip < (DWORD)g_base + 0xE00000 ? "D+" : "abs ",
-              (unsigned long)(g_wbp_ring[g_wbp_read].eip > (DWORD)g_base && g_wbp_ring[g_wbp_read].eip < (DWORD)g_base + 0xE00000 ? g_wbp_ring[g_wbp_read].eip - (DWORD)g_base : g_wbp_ring[g_wbp_read].eip), g_wbp_ring[g_wbp_read].v, s);
+        logf_("wbp hit: T%lu eip %s%lx row0x %.3f (%08lx), stack%s", (unsigned long)g_wbp_ring[g_wbp_read].tid, g_wbp_ring[g_wbp_read].eip > (DWORD)g_base && g_wbp_ring[g_wbp_read].eip < (DWORD)g_base + 0xE00000 ? "D+" : "abs ",
+              (unsigned long)(g_wbp_ring[g_wbp_read].eip > (DWORD)g_base && g_wbp_ring[g_wbp_read].eip < (DWORD)g_base + 0xE00000 ? g_wbp_ring[g_wbp_read].eip - (DWORD)g_base : g_wbp_ring[g_wbp_read].eip), g_wbp_ring[g_wbp_read].v, (unsigned long)g_wbp_ring[g_wbp_read].u, s);
     }
     if (g_wbp_addr && g_wbp_hits >= g_wbp_max) wbp_set(0);
 }
@@ -4575,6 +4601,7 @@ static void npc_diff(int j, BYTE *obj, DWORD now)
 static void npc_join_tick(DWORD now)
 {
     wbp_tick();
+    tgtav_tick();
     static DWORD last_find;
     static int need_agent;
     int j, k;
@@ -6569,6 +6596,147 @@ static int tgt_swap(void)
         }
     }
     return n;
+}
+/* tgtwbp <n> (RE): in the first host NPC agent fighting our player (+0x274 2..5, node at agent+0x220 holds the global
+ * player agent at +0x30), point that node at the avatar's agent and put the hardware write breakpoint on node+0x30:
+ * the next n writes (the NPC putting its target back) are logged with the writer and the stack. */
+static void tgt_wbp(int nmax)
+{
+    typedef void *(__attribute__((thiscall)) *gc_t)(void *ent, void *key);
+    void *h2 = NULL;
+    BYTE *ao = g_av_id ? entity_obj(g_av_id, &h2) : NULL, *c2, *aag;
+    DWORD pag = *(DWORD *)(g_base + 0x1652108);
+    int i;
+    if (h2) (*(int *)((BYTE *)h2 + 8))--;
+    c2 = ao ? ((gc_t)(g_base + 0x4E2CC0))(ao, (void *)(g_base + 0xFE4090)) : NULL;
+    aag = c2 ? *(BYTE **)(c2 + 0x14) : NULL;
+    for (i = 0; i < g_nh_n; i++) {
+        void *hd = NULL;
+        BYTE *o = entity_obj(g_nh[i].id, &hd), *cp, *ag, *node;
+        int st;
+        if (hd) (*(int *)((BYTE *)hd + 8))--;
+        if (!o) continue;
+        cp = ((gc_t)(g_base + 0x4E2CC0))(o, (void *)(g_base + 0xFE4090));
+        ag = cp ? *(BYTE **)(cp + 0x14) : NULL;
+        if (!ag || IsBadReadPtr(ag, 0x300)) continue;
+        st = *(int *)(ag + 0x274);
+        if (st < 2 || st > 5) continue;
+        node = *(BYTE **)(ag + 0x220);
+        if (!node || IsBadReadPtr(node, 0x40) || *(DWORD *)(node + 0x30) != pag) continue;
+        g_wbp_hits = 0; g_wbp_read = 0; g_wbp_max = nmax > 64 ? 64 : nmax;
+        logf_("tgtwbp: npc %llu agent %p node %p (vt %lx) state %d; avatar agent %p", g_nh[i].id, ag, node,
+              (unsigned long)(*(DWORD *)node - (DWORD)g_base), st, aag);
+        if (aag) *(BYTE **)(node + 0x30) = aag;
+        wbp_set((DWORD)(node + 0x30));
+        return;
+    }
+    logf_("tgtwbp: no NPC fighting our player");
+}
+/* tgtav (on by default, host): an NPC agent's threat scanner FUN_1099a050 (ECX = scanner, scanner+0x34 = agent) rebuilds
+ * (thiscall, one stack argument: ret 4) the agent's target list (+0x220, 0x34-byte entries, agent at +0x30) every frame. Other agents get in only through
+ * perception checks the avatar does not pass in a town; at the end, in combat (+0x274 3..5, or 2 with fact 7) with
+ * fact 0x3F, the global player agent [D+1652108] is always added. In a ceasefire zone (other agent's zone flag 0x02,
+ * FUN_10961f10(1)) a perceived agent is taken only if its vf+0xBC (agent+0x94C, "is the player", set only for the
+ * player's agent) is 1: why town NPCs fought only our player. While an NPC nearer the avatar than our player is
+ * scanned, the avatar's agent has +0x94C = 1 and the global points at it, so that NPC fights the joiner; both are put
+ * back right after the scan. Positions are cached per frame on
+ * the main thread (the scanner runs on it too). */
+static void *g_tgt_orig;
+static BYTE *g_tgt_aag;
+static float g_tgt_pp[3], g_tgt_ap[3];
+static unsigned g_tgt_swaps, g_tgt_calls;
+static int __attribute__((thiscall)) tgt_scan_hook(BYTE *sc, void *arg)
+{
+    typedef int (__attribute__((thiscall)) *orig_t)(BYTE *, void *);
+    BYTE *ag = sc ? *(BYTE **)(sc + 0x34) : NULL, *aag = g_tgt_aag;
+    DWORD *glob = (DWORD *)(g_base + 0x1652108), was;
+    int r;
+    g_tgt_calls++;
+    if (!g_tgtav || !aag || !ag || ag == aag || ag == (BYTE *)*glob || !*glob) return ((orig_t)g_tgt_orig)(sc, arg);
+    {
+        typedef float *(__attribute__((thiscall)) *pos_t)(void *, float *);
+        float q[4], *v = ((pos_t)(*(void ***)ag)[0x78 / 4])(ag, q), da, db;
+        da = (v[0] - g_tgt_pp[0]) * (v[0] - g_tgt_pp[0]) + (v[1] - g_tgt_pp[1]) * (v[1] - g_tgt_pp[1]);
+        db = (v[0] - g_tgt_ap[0]) * (v[0] - g_tgt_ap[0]) + (v[1] - g_tgt_ap[1]) * (v[1] - g_tgt_ap[1]);
+        if (db >= da) return ((orig_t)g_tgt_orig)(sc, arg);
+    }
+    {
+        BYTE pf = aag[0x94C];
+        was = *glob; *glob = (DWORD)aag; aag[0x94C] = 1; g_tgt_swaps++;
+        r = ((orig_t)g_tgt_orig)(sc, arg);
+        *glob = was; aag[0x94C] = pf;
+    }
+    return r;
+}
+static void tgtav_tick(void)
+{
+    typedef void *(__attribute__((thiscall)) *gc_t)(void *ent, void *key);
+    static DWORD lastlog;
+    void *h1 = NULL, *h2 = NULL;
+    BYTE *po, *ao, *c2;
+    DWORD now = GetTickCount();
+    if (g_npc_role != 1 || !g_tgtav) { g_tgt_aag = NULL; return; }
+    if (!g_tgt_orig) {
+        static const BYTE pro[6] = { 0x55, 0x8B, 0xEC, 0x83, 0xE4, 0xF8 };
+        if (memcmp(g_base + 0x99A050, pro, 6)) { logf_("tgtav: unexpected bytes at 99A050, off"); g_tgtav = 0; return; }
+        g_tgt_orig = make_detour(g_base + 0x99A050, 6, (void *)tgt_scan_hook, 1);
+        logf_("tgtav: threat scanner hook on 99A050 installed");
+    }
+    po = entity_obj(g_net_id, &h1); ao = g_av_id ? entity_obj(g_av_id, &h2) : NULL;
+    if (h1) (*(int *)((BYTE *)h1 + 8))--;
+    if (h2) (*(int *)((BYTE *)h2 + 8))--;
+    c2 = ao ? ((gc_t)(g_base + 0x4E2CC0))(ao, (void *)(g_base + 0xFE4090)) : NULL;
+    if (!po || !c2) { g_tgt_aag = NULL; return; }
+    memcpy(g_tgt_pp, po + 0x60, 12); memcpy(g_tgt_ap, ao + 0x60, 12);
+    g_tgt_aag = *(BYTE **)(c2 + 0x14);
+    if (now - lastlog > 10000 && g_tgt_swaps) { lastlog = now; logf_("tgtav: %u of %u threat scans took the avatar as the player", g_tgt_swaps, g_tgt_calls); g_tgt_swaps = g_tgt_calls = 0; }
+}
+/* tgtwhy (research): the threat scanner FUN_1099a050 takes another agent only if the NPC perceives it: record in the
+ * perception map (agent+0x28C, map at [+0x24], key = other agent+0xC, FUN_10a235c0) with flag bits 0..2 all set and a
+ * threat score (+0x44) over agent+0x86C; then zone (FUN_10961f10(1): other in ceasefire zone -> needs vf+0xBC) or army
+ * (+0x26C, 3 = neutral; vf+0xC8). Logs that for the avatar and our player, for fighting NPCs within 50 m of the avatar. */
+static void tgt_why(void)
+{
+    typedef void *(__attribute__((thiscall)) *gc_t)(void *ent, void *key);
+    typedef char (__attribute__((thiscall)) *find_t)(void *map, DWORD *key, DWORD **rec);
+    typedef char (__attribute__((thiscall)) *vb_t)(void *);
+    void *h2 = NULL;
+    BYTE *ao = g_av_id ? entity_obj(g_av_id, &h2) : NULL, *c2, *who[2];
+    int i, k, nn = 0;
+    if (h2) (*(int *)((BYTE *)h2 + 8))--;
+    c2 = ao ? ((gc_t)(g_base + 0x4E2CC0))(ao, (void *)(g_base + 0xFE4090)) : NULL;
+    who[0] = c2 ? *(BYTE **)(c2 + 0x14) : NULL; who[1] = *(BYTE **)(g_base + 0x1652108);
+    for (k = 0; k < 2; k++) if (who[k] && !IsBadReadPtr(who[k], 0xA00))
+        logf_("tgtwhy %s agent %p: id+C %08lx army %d state %d zone %d/%02x +69C %d vfC8 %d vfBC %d vfCC %d", k ? "player" : "avatar", who[k],
+              (unsigned long)*(DWORD *)(who[k] + 0xC), *(int *)(who[k] + 0x26C), *(int *)(who[k] + 0x274), *(int *)(who[k] + 0x998), who[k][0x99C],
+              *(int *)(who[k] + 0x69C), ((vb_t)(*(void ***)who[k])[0xC8 / 4])(who[k]), ((vb_t)(*(void ***)who[k])[0xBC / 4])(who[k]), ((vb_t)(*(void ***)who[k])[0xCC / 4])(who[k]));
+    if (!who[0] || !who[1]) { logf_("tgtwhy: no avatar agent or player agent"); return; }
+    for (i = 0; i < g_nh_n && nn < 8; i++) {
+        void *hd = NULL;
+        BYTE *o = entity_obj(g_nh[i].id, &hd), *cp, *ag, *map;
+        char line[400];
+        int len, st;
+        float dx, dy;
+        if (hd) (*(int *)((BYTE *)hd + 8))--;
+        if (!o) continue;
+        dx = *(float *)(o + 0x60) - *(float *)(ao + 0x60); dy = *(float *)(o + 0x64) - *(float *)(ao + 0x64);
+        if (dx * dx + dy * dy > 2500) continue;
+        cp = ((gc_t)(g_base + 0x4E2CC0))(o, (void *)(g_base + 0xFE4090));
+        ag = cp ? *(BYTE **)(cp + 0x14) : NULL;
+        if (!ag || IsBadReadPtr(ag, 0xA00)) continue;
+        st = *(int *)(ag + 0x274);
+        map = *(BYTE **)(ag + 0x28C + 0x24);
+        len = snprintf(line, sizeof line, "tgtwhy npc %llu %.0f m from the avatar: state %d army %d zone %d/%02x thr %.2f/%.2f", g_nh[i].id,
+                       sqrt(dx * dx + dy * dy), st, *(int *)(ag + 0x26C), *(int *)(ag + 0x998), ag[0x99C], *(float *)(ag + 0x868), *(float *)(ag + 0x86C));
+        for (k = 0; k < 2 && map; k++) {
+            DWORD key = *(DWORD *)(who[k] + 0xC), *rec = NULL;
+            char f = ((find_t)(g_base + 0xA235C0))(map, &key, &rec);
+            if (f && rec && !IsBadReadPtr(rec, 0x48)) len += snprintf(line + len, sizeof line - len, "; %s flags %08lx:%08lx score %.2f", k ? "player" : "avatar", (unsigned long)rec[1], (unsigned long)rec[0], *(float *)(rec + 0x11));
+            else len += snprintf(line + len, sizeof line - len, "; %s not perceived", k ? "player" : "avatar");
+        }
+        logf_("%s", line);
+        nn++;
+    }
 }
 /* perf (on by default, `perf 0` off): time of each probe tick per frame (QueryPerformanceCounter) and the gap between
  * frames; every 10 s one line with the frame count, frames over 50 / 150 ms, the worst gap, and the probe's own worst
