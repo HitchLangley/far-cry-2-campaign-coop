@@ -1,4 +1,4 @@
-<svg xmlns="http://www.w3.org/2000/svg" width="840" height="482" viewBox="0 0 840 482" role="img" aria-label="Far Cry 2 Campaign Coop: 38% overall">
+<svg xmlns="http://www.w3.org/2000/svg" width="840" height="482" viewBox="0 0 840 482" role="img" aria-label="Far Cry 2 Campaign Coop: 41% overall">
 <style>
   .bg { fill: #ffffff; } .title { font: 700 22px system-ui, -apple-system, "Segoe UI", sans-serif; fill: #1f2328; }
   .label { font: 500 14px system-ui, -apple-system, "Segoe UI", sans-serif; fill: #1f2328; }
@@ -16,11 +16,11 @@
 <rect class="bg" x="0.5" y="0.5" width="839" height="481" rx="14"/>
 <rect class="frame" x="0.5" y="0.5" width="839" height="481" rx="14"/>
 <text class="title" x="32" y="54">Far Cry 2 Campaign Coop</text>
-<text class="muted" x="32" y="78">Progress estimate, 14 November 2026</text>
+<text class="muted" x="32" y="78">Progress estimate, 17 November 2026</text>
 <text class="label" x="32" y="108">Campaign co-op overall</text>
-<text class="big" x="808" y="138" text-anchor="end">38%</text>
+<text class="big" x="808" y="138" text-anchor="end">41%</text>
 <rect class="track" x="32" y="122" width="666" height="14" rx="7"/>
-<rect class="fill" x="32" y="122" width="253" height="14" rx="7"/>
+<rect class="fill" x="32" y="122" width="273" height="14" rx="7"/>
 <text class="label" x="32" y="170">Joining and menu</text>
 <text class="pct" x="404" y="170" text-anchor="end">85%</text>
 <rect class="track" x="32" y="179" width="372" height="8" rx="4"/>
@@ -42,9 +42,9 @@
 <rect class="track" x="32" y="271" width="372" height="8" rx="4"/>
 <rect class="fill" x="32" y="271" width="204" height="8" rx="4"/>
 <text class="label" x="436" y="262">Enemies attack the joiner</text>
-<text class="pct" x="808" y="262" text-anchor="end">30%</text>
+<text class="pct" x="808" y="262" text-anchor="end">50%</text>
 <rect class="track" x="436" y="271" width="372" height="8" rx="4"/>
-<rect class="part" x="436" y="271" width="111" height="8" rx="4"/>
+<rect class="fill" x="436" y="271" width="186" height="8" rx="4"/>
 <text class="label" x="32" y="308">World state</text>
 <text class="pct" x="404" y="308" text-anchor="end">10%</text>
 <rect class="track" x="32" y="317" width="372" height="8" rx="4"/>
@@ -54,15 +54,15 @@
 <rect class="track" x="436" y="317" width="372" height="8" rx="4"/>
 <line class="rule" x1="32" y1="360" x2="808" y2="360"/>
 <rect class="tile" x="32" y="380" width="182" height="70" rx="10"/>
-<text class="stat" x="46" y="414">51 h</text>
+<text class="stat" x="46" y="414">54 h</text>
 <text class="muted small" x="46" y="435">AI-assisted development</text>
 <rect class="tile" x="230" y="380" width="182" height="70" rx="10"/>
-<text class="stat" x="244" y="414">610</text>
-<text class="muted small" x="244" y="435">game test runs (63 h)</text>
+<text class="stat" x="244" y="414">686</text>
+<text class="muted small" x="244" y="435">game test runs (69 h)</text>
 <rect class="tile" x="428" y="380" width="182" height="70" rx="10"/>
-<text class="stat" x="442" y="414">87</text>
+<text class="stat" x="442" y="414">98</text>
 <text class="muted small" x="442" y="435">commits</text>
 <rect class="tile" x="626" y="380" width="182" height="70" rx="10"/>
-<text class="stat" x="640" y="414">17</text>
+<text class="stat" x="640" y="414">19</text>
 <text class="muted small" x="640" y="435">days of work sessions</text>
 </svg>

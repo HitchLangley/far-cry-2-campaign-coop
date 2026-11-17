@@ -4,7 +4,7 @@
 import os
 
 TITLE = 'Far Cry 2 Campaign Coop'
-DATE = '14 November 2026'
+DATE = '17 November 2026'
 # (area, percent, weight in the overall figure): the campaign itself (missions, world) weighs more
 AREAS = [
     ('Joining and menu', 85, 1),
@@ -12,15 +12,15 @@ AREAS = [
     ('Player hits', 80, 1),
     ('Vehicles', 60, 1),
     ('NPCs on the joiner', 55, 2),
-    ('Enemies attack the joiner', 30, 2),
+    ('Enemies attack the joiner', 50, 2),
     ('World state', 10, 2),
     ('Missions and story', 0, 3),
 ]
 STATS = [
-    ('51 h', 'AI-assisted development'),
-    ('610', 'game test runs (63 h)'),
-    ('87', 'commits'),
-    ('17', 'days of work sessions'),
+    ('54 h', 'AI-assisted development'),
+    ('686', 'game test runs (69 h)'),
+    ('98', 'commits'),
+    ('19', 'days of work sessions'),
 ]
 
 W, PAD = 840, 32

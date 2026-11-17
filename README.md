@@ -10,7 +10,7 @@ Maintained by [HitchLangley](https://github.com/HitchLangley). Started from
 [MortyRei/fc2-coop-probe](https://github.com/MortyRei/fc2-coop-probe) (initial import, MIT);
 everything after that is developed here, on the `main` branch.
 
-<p align="center"><img src="docs/progress.svg" width="840" alt="Progress estimate: 38% overall; joining 85%, partner avatar 75%, player hits 80%, vehicles 60%, NPCs on the joiner 55%, enemies attack the joiner 30%, world state 10%, missions 0%. 51 h of AI-assisted development, 610 game test runs, 87 commits."></p>
+<p align="center"><img src="docs/progress.svg" width="840" alt="Progress estimate: 41% overall; joining 85%, partner avatar 75%, player hits 80%, vehicles 60%, NPCs on the joiner 55%, enemies attack the joiner 50%, world state 10%, missions 0%. 54 h of AI-assisted development, 686 game test runs, 98 commits."></p>
 
 The percentages are the maintainer's estimates (missions and world state weigh more in the overall figure); redraw with `python tools/make_progress_svg.py`.
 
@@ -27,8 +27,8 @@ over Steam. The newest work (enemies, NPC fights) has not been run on two PCs ye
 | Vehicles | Works on one PC: both players in one car, seats with animations |
 | Time of day | Synced from the host |
 | NPCs | The host runs all NPCs; the joiner shows them as puppets: movement, idle actions (sitting, smoking), mounted guns. Fights are rough (see issues) |
-| Enemies attacking the joiner | Experiment, off by default (`avai 1` on the host, needs a patched entity library): host NPCs shoot the joiner and the hits take the joiner's health |
-| Not synced yet | Missions and story, pickups and other world state, death and revive, alarms at outposts |
+| Enemies attacking the joiner | Experiment, off by default (`avai 1` on the host, needs a patched entity library): host NPCs shoot the joiner and the hits take the joiner's health, at outposts and in towns (town alarm shared by both players; NPCs nearer the joiner fight the joiner) |
+| Not synced yet | Missions and story, pickups and other world state, death and revive, alarms at outposts (town alarms are synced) |
 
 Known problems are tracked in [Issues](https://github.com/HitchLangley/far-cry-2-campaign-coop/issues).
 
@@ -71,7 +71,9 @@ between two PCs on different networks over Steam.
 - **NPCs react to the joiner**: the joiner's hits alarm the host's NPCs; hands-up and shove reactions to the joiner
   are passed to the host. One PC.
 - **Enemies fight the joiner** (experiment, off by default, `avai 1`): host NPCs see and shoot the joiner's avatar
-  and the hits take the joiner's health. One PC.
+  and the hits take the joiner's health. In towns the ceasefire alarm rises on both copies within about 0.1 s, and the
+  NPCs nearer the joiner than the host take the joiner as their target (the engine lets town NPCs target only "the
+  player"; the host flags the joiner's avatar as the player only while those NPCs pick a target). One PC.
 
 ### Tools for development
 - A Lua channel and about a hundred native commands inside the running game ([commands](docs/COMMANDS.md)).
@@ -180,14 +182,14 @@ heading code (the avatar stays at 0 degrees).
 
 ## Time spent
 
-Counted on 2026-11-14 from the development machine's own records (session transcripts, probe logs, git):
+Counted on 2026-11-17 from the development machine's own records (session transcripts, probe logs, git):
 
 | What | Amount |
 |---|---|
-| Period | 19 October 2026 (initial import) to 14 November 2026; work sessions on 17 days from 24 October |
-| AI-assisted development (Claude Code: reading the engine in Ghidra, writing and building the probe, analysing logs, running tests) | about 51 hours of active session time (46-56 h depending on how short a pause still counts as work), 557 messages from the maintainer, about 6,300 tool calls |
-| Game test runs | 610 runs of the two test copies, 63 hours of game time in total (both copies counted) |
-| Commits | 87 |
+| Period | 19 October 2026 (initial import) to 17 November 2026; work sessions on 19 days from 24 October |
+| AI-assisted development (Claude Code: reading the engine in Ghidra, writing and building the probe, analysing logs, running tests) | about 54 hours of active session time, 596 messages from the maintainer, about 6,600 tool calls |
+| Game test runs | 686 runs of the two test copies, 69 hours of game time in total (both copies counted) |
+| Commits | 98 |
 
 Active time is the sum of gaps of up to 10 minutes between session events; parallel sessions count once. Time spent
 playing and testing by hand outside the sessions is not included.
