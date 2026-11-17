@@ -572,6 +572,21 @@ static int g_cflog;                  /* cflog 0|1: ceasefire research log (cf_ti
 static int g_almsync = 1;            /* almsync 0|1: the joiner's town alarm raises the host's (ALM1, cf_tick) */
 static DWORD g_alm_pending;           /* host: an ALM1 arrived and the host's town is not alarmed yet */
 static int g_alm_force;               /* almsend (test): send ALM1 as if our town alarm had risen */
+static int g_alm_kicks;               /* host: kicks for the current ALM1 */
+static int g_alm_host;                /* host: our town alarm / joiner: the host's, from the NPC packets */
+static unsigned long long g_alm_zone = ~0ULL;   /* our town's zone id while alarmed (status +0x1A0) */
+static unsigned long long g_alm_zone_rx = ~0ULL;   /* joiner: the host's zone id */
+/* raise our town alarm now (status [[D+1607408]+0xC]: +0x198, zone +0x1A0): the game itself recounts it from the AI
+ * agents every few seconds (FUN_1095d5a0), which left the copies up to 3 s apart; the next recount keeps it up as long
+ * as an NPC fights (on the joiner the puppets carry the host's combat states) */
+static void alm_set(unsigned long long zone)
+{
+    BYTE *g = *(BYTE **)(g_base + 0x1607408), *s = g && !IsBadReadPtr(g + 0xC, 4) ? *(BYTE **)(g + 0xC) : NULL;
+    if (!s || IsBadReadPtr(s + 0x198, 0x10) || s[0x198]) return;
+    s[0x198] = 1;
+    if (*(unsigned long long *)(s + 0x1A0) == ~0ULL && zone != ~0ULL) *(unsigned long long *)(s + 0x1A0) = zone;
+    { static DWORD lastlog; if (GetTickCount() - lastlog > 5000) logf_("almsync: town alarm set here from the other copy (zone %016llx)", zone); lastlog = GetTickCount(); }
+}
 static int g_agentlist = 1, g_agentcmp;  /* agentlist 0|1: NPCs from the game's agent list (agent_list_walk); 2: compare once with a memory scan */
 static double g_scanms = 2.0;         /* scanms <ms>: time budget per frame of the NPC / vehicle memory scans (0 = bytes only) */
 static void br_start(int port);
@@ -3148,8 +3163,8 @@ static void hit_tick(DWORD now)
 #define NPC_MAGIC 0x3143504Eu
 #define NPC_MAX 64   /* 24 filled up in a town fight: reinforcements past it never reached the joiner (#10) */
 #pragma pack(push, 1)
-typedef struct { unsigned long long id; float pos[3]; int vel[3], aim[4]; unsigned char s104, s11c, s110, pad; float hp, hpmax; unsigned pulls; float shot[3]; } NpcEnt;
-typedef struct { unsigned magic, seq, count, total; NpcEnt e[NPC_MAX]; } NpcPkt;   /* count in this datagram, total in the host's list */
+typedef struct { unsigned long long id; float pos[3]; int vel[3], aim[4]; unsigned char s104, s11c, s110, pad; float hp, hpmax; unsigned pulls; float shot[3]; unsigned char ast, ast2, zk, zf; } NpcEnt;   /* ast/ast2: the AI agent's combat state +0x274/+0x278 (town alarm) */
+typedef struct { unsigned magic, seq, count, total; unsigned long long zone; NpcEnt e[NPC_MAX]; } NpcPkt;   /* total: bit 31 = the host's town alarm; zone: its id (status +0x1A0) */   /* count in this datagram, total in the host's list */
 #pragma pack(pop)
 static struct { unsigned long long id; BYTE *mem, *obj; unsigned shots, fires; BYTE lastfire; void *wcur; int wmode; char wname[64]; unsigned wcat; DWORD wsent; unsigned lastact, animhash; DWORD animsent; } g_nh[NPC_MAX];
 static int g_nh_n;
@@ -3165,7 +3180,7 @@ static void cf_tick(DWORD now)
     static struct { unsigned long long id; int st, zk, zf; } prev[NPC_MAX + 1];
     BYTE *g, *s;
     int i;
-    if ((!g_cflog && !g_cfav && !g_almsync) || now - last < 250) return;
+    if ((!g_cflog && !g_cfav && !g_almsync) || now - last < 50) return;
     last = now;
     g = *(BYTE **)(g_base + 0x1607408);
     s = g && !IsBadReadPtr(g + 0xC, 4) ? *(BYTE **)(g + 0xC) : NULL;
@@ -3191,11 +3206,28 @@ static void cf_tick(DWORD now)
     if (g_almsync && s && !IsBadReadPtr(s + 0x198, 1)) {
         static BYTE jprev;
         static DWORD lastkick;
-        if (g_npc_role == 2 && ((s[0x198] && !jprev) || g_alm_force) && g_ns != INVALID_SOCKET) {
-            g_alm_force = 0;
-            unsigned pk[2] = { 0x314D4C41u, 1 };
-            sendto(g_ns, (char *)pk, sizeof pk, 0, (struct sockaddr *)&g_peer, sizeof g_peer);
-            logf_("almsync: our town alarm is up -> told the host");
+        static DWORD jlast;
+        if (g_npc_role == 1) {
+            static BYTE hprev;
+            static DWORD hlast;
+            g_alm_host = s[0x198] != 0; g_alm_zone = *(unsigned long long *)(s + 0x1A0);
+            /* the host's alarm goes out at once (and twice more 100 ms apart), not only with the next NPC packet */
+            if (s[0x198] && (!hprev || (now - hlast >= 100 && now - hlast < 400)) && g_ns != INVALID_SOCKET) {
+                struct { unsigned magic, seq; unsigned long long zone; } hk = { 0x314D4C41u, 2, *(unsigned long long *)(s + 0x1A0) };
+                sendto(g_ns, (char *)&hk, sizeof hk, 0, (struct sockaddr *)&g_peer, sizeof g_peer);
+                if (!hprev) { hlast = now; logf_("almsync: host town alarm up -> told the joiner"); }
+            }
+            if (!s[0x198]) hlast = 0;
+            hprev = s[0x198];
+        }
+        /* joiner: hold the flag while the host reports its town alarmed (the game's recount here can drop it) */
+        if (g_npc_role == 2 && g_alm_host && !s[0x198]) alm_set(g_alm_zone_rx);
+        /* repeated every 500 ms while the host still reports a calm town: one lost datagram must not leave it calm */
+        if (g_npc_role == 2 && ((s[0x198] && (!jprev || (!g_alm_host && now - jlast >= 500))) || g_alm_force) && g_ns != INVALID_SOCKET) {
+            g_alm_force = 0; jlast = now;
+            struct { unsigned magic, seq; unsigned long long zone; } pk = { 0x314D4C41u, 1, *(unsigned long long *)(s + 0x1A0) };
+            sendto(g_ns, (char *)&pk, sizeof pk, 0, (struct sockaddr *)&g_peer, sizeof g_peer);
+            if (!jprev) logf_("almsync: our town alarm is up -> told the host");
         }
         if (g_npc_role == 2) jprev = s[0x198];
         if (g_npc_role == 1 && g_alm_pending && !g_alm_have) {
@@ -3206,8 +3238,10 @@ static void cf_tick(DWORD now)
             if ((f = fopen(path, "rb"))) { if (fread(&g_alm_tmpl, sizeof g_alm_tmpl, 1, f) == 1) { g_alm_have = 1; logf_("almsync: hit template loaded from %s", path); } fclose(f); }
         }
         if (g_npc_role == 1 && g_alm_pending) {
-            if (s[0x198] || (int)(now - g_alm_pending) > 15000) { logf_("almsync: host alarm %s", s[0x198] ? "up" : "still down after 15 s, giving up"); g_alm_pending = 0; }
-            else if (g_alm_have && now - lastkick > 2000) {
+            /* at least one kick even when alm_set already raised the flag: without an NPC in combat the game's next
+             * recount drops it again */
+            if ((s[0x198] && g_alm_kicks) || (int)(now - g_alm_pending) > 15000) { logf_("almsync: host alarm %s", s[0x198] ? "up" : "still down after 15 s, giving up"); g_alm_pending = 0; g_alm_kicks = 0; }
+            else if (g_alm_have && (now - lastkick >= 500 || !g_alm_kicks)) {
                 void *ha = NULL;
                 BYTE *av = g_av_id ? entity_obj(g_av_id, &ha) : NULL, *best = NULL;
                 unsigned long long bid = 0;
@@ -3228,6 +3262,7 @@ static void cf_tick(DWORD now)
                     k.amount = 1;
                     st_deliver(&k, best, *(void ***)best == &g_st_vt[2][1] ? g_st_orig[2] : (*(void ***)best)[0x20 / 4], g_net_id);
                     logf_("almsync: kicked NPC %llu (%.0f m from the avatar) with a 1-point hit", bid, sqrtf(bd));
+                    g_alm_kicks++;
                 }
             }
         }
@@ -3880,6 +3915,17 @@ static void npc_host_tick(DWORD now)
         if (e->s104 && !g_nh[i].lastfire) g_nh[i].fires++;
         g_nh[i].lastfire = e->s104;
         e->hp = npc_hp(obj, &e->hpmax);
+        {
+            /* the agent's combat state: the joiner writes it into its paused puppet, so its own town-alarm check
+             * (FUN_1095d5a0: an agent in state 2..5) rises in the same packet as the host's */
+            BYTE *acp = ((gcomp_t)(g_base + 0x4E2CC0))(obj, (void *)(g_base + 0xFE4090)), *aag = acp ? *(BYTE **)(acp + 0x14) : NULL;
+            e->ast = aag && !IsBadReadPtr(aag + 0x274, 8) ? (unsigned char)*(int *)(aag + 0x274) : 0xFF;
+            e->ast2 = aag && !IsBadReadPtr(aag + 0x274, 8) ? (unsigned char)*(int *)(aag + 0x278) : 0xFF;
+            /* and its zone (kind +0x998, flags +0x99C): a paused puppet never recomputes them, so the joiner's alarm
+             * recount did not count it (alarm set from the host was dropped again within a frame) */
+            e->zk = aag && !IsBadReadPtr(aag + 0x998, 8) ? (unsigned char)*(int *)(aag + 0x998) : 0xFF;
+            e->zf = aag && !IsBadReadPtr(aag + 0x998, 8) ? aag[0x99C] : 0xFF;
+        }
         e->pulls = g_nh[i].shots;
         n++;
     }
@@ -3919,9 +3965,9 @@ static void npc_host_tick(DWORD now)
     for (i = 0; i < n; i += 12) {
         NpcPkt part;
         int c = n - i < 12 ? n - i : 12;
-        part.magic = NPC_MAGIC; part.seq = pk.seq; part.count = c; part.total = n;
+        part.magic = NPC_MAGIC; part.seq = pk.seq; part.count = c; part.total = (unsigned)n | (g_alm_host ? 0x80000000u : 0); part.zone = g_alm_zone;
         memcpy(part.e, pk.e + i, c * sizeof(NpcEnt));
-        sendto(g_ns, (char *)&part, 16 + c * sizeof(NpcEnt), 0, (struct sockaddr *)&g_peer, sizeof g_peer);
+        sendto(g_ns, (char *)&part, 24 + c * sizeof(NpcEnt), 0, (struct sockaddr *)&g_peer, sizeof g_peer);
     }
 }
 static unsigned g_np_hostcount;
@@ -3981,8 +4027,11 @@ static void npc_rx(const NpcPkt *pk, int len)
 {
     unsigned i;
     int j;
-    if (g_npc_role != 2 || len < 16 || pk->count > NPC_MAX || len < (int)(16 + pk->count * sizeof(NpcEnt))) return;
-    g_np_hostcount = pk->total;   /* was the datagram's count (12 at most), so "the host's list is full" never held */
+    if (g_npc_role != 2 || len < 24 || pk->count > NPC_MAX || len < (int)(24 + pk->count * sizeof(NpcEnt))) return;
+    g_np_hostcount = pk->total & 0x7FFFFFFFu;   /* was the datagram's count (12 at most), so "the host's list is full" never held */
+    g_alm_host = pk->total >> 31;   /* the host's town alarm (almsync) */
+    g_alm_zone_rx = pk->zone;
+    if (g_almsync && g_alm_host) alm_set(pk->zone);   /* at once: the game recounts its own alarm only every few seconds */
     if (!g_np_first) g_np_first = GetTickCount() | 1;
     for (i = 0; i < pk->count; i++) {
         for (j = 0; j < g_np_n && g_np[j].id != pk->e[i].id; j++) ;
@@ -4644,6 +4693,11 @@ static void npc_join_tick(DWORD now)
         }
         if (g_nmssync) mount_tick(g_np[j].id, g_np[j].lid ? g_np[j].lid : g_np[j].id, obj, now);
         { float ip[4]; np_pos(m + 4, g_npcinterp && npc_interp(j, now, ip) ? ip : e->pos); }
+        if (g_almsync && e->ast <= 10 && g_np[j].agent && !IsBadReadPtr(g_np[j].agent + 0x274, 8)) {
+            *(int *)(g_np[j].agent + 0x274) = e->ast;
+            if (e->ast2 <= 10) *(int *)(g_np[j].agent + 0x278) = e->ast2;
+            if (e->zk != 0xFF && !IsBadReadPtr(g_np[j].agent + 0x998, 8)) { *(int *)(g_np[j].agent + 0x998) = e->zk; g_np[j].agent[0x99C] = e->zf; }
+        }
         for (k = 0; k < 3; k++) { *(int *)(m + 0x78 + 0x14 * k) = e->vel[k]; m[0x74 + 0x14 * k] = 1; }
         {
             /* height: NetPlayer corrects position errors only above 1.5 m and a puppet's controller keeps the packet's
@@ -6545,7 +6599,8 @@ static void net_tick(void)
         if (r == (int)sizeof(NpcMsPkt) && rb.magic == NMS_MAGIC) { if (from.sin_addr.s_addr == g_peer.sin_addr.s_addr) nms_rx((const NpcMsPkt *)&rb); continue; }
         if (r == (int)sizeof(NpcAnimPkt) && rb.magic == NANM_MAGIC) { if (from.sin_addr.s_addr == g_peer.sin_addr.s_addr) npc_anim_rx((const NpcAnimPkt *)&rb); continue; }
         if (r == (int)sizeof(NpcHitPkt) && rb.magic == NSHT_MAGIC) { if (from.sin_addr.s_addr == g_peer.sin_addr.s_addr) npc_shot_apply((const NpcHitPkt *)&rb); continue; }
-        if (r == 8 && rb.magic == 0x314D4C41u) { if (from.sin_addr.s_addr == g_peer.sin_addr.s_addr && g_npc_role == 1 && g_almsync) { if (!g_alm_pending) logf_("almsync: the joiner's town is alarmed"); g_alm_pending = GetTickCount() | 1; } continue; }
+        if (r == 16 && rb.magic == 0x314D4C41u && g_npc_role == 2) { if (from.sin_addr.s_addr == g_peer.sin_addr.s_addr && g_almsync) { g_alm_host = 1; g_alm_zone_rx = *(unsigned long long *)((BYTE *)&rb + 8); alm_set(*(unsigned long long *)((BYTE *)&rb + 8)); } continue; }
+        if (r == 16 && rb.magic == 0x314D4C41u) { if (from.sin_addr.s_addr == g_peer.sin_addr.s_addr && g_npc_role == 1 && g_almsync) { if (!g_alm_pending) logf_("almsync: the joiner's town is alarmed"); g_alm_pending = GetTickCount() | 1; alm_set(*(unsigned long long *)((BYTE *)&rb + 8)); } continue; }
         if (r == (int)sizeof(NpcHitPkt) && rb.magic == NHIT_MAGIC) { if (from.sin_addr.s_addr == g_peer.sin_addr.s_addr) npc_hit_apply((const NpcHitPkt *)&rb); continue; }
         if (r > 4 && r < 68 && rb.magic == NAM_MAGIC) {
             /* only while the peer's game is really there: after it left, its relay keeps sending the name for ~20 s and
