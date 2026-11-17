@@ -569,6 +569,9 @@ static int g_npcfirevar = 1;  /* npcfirevar 0 block only | 1 + event 0x121ADE93 
 static int g_npcnofire;  /* npcnofire 0|1 (test): puppets on the joiner do not fire */
 static int g_avai = 0, g_avai_missing;  /* avai 0|1 (experiment, off): on the host the avatar is coop.PawnPlayerAI (AI component; needs the make_avatar_ai.py patch). NPCs still ignored it */
 static int g_cflog;                  /* cflog 0|1: ceasefire research log (cf_tick) */
+static int g_almsync = 1;            /* almsync 0|1: the joiner's town alarm raises the host's (ALM1, cf_tick) */
+static DWORD g_alm_pending;           /* host: an ALM1 arrived and the host's town is not alarmed yet */
+static int g_alm_force;               /* almsend (test): send ALM1 as if our town alarm had risen */
 static int g_agentlist = 1, g_agentcmp;  /* agentlist 0|1: NPCs from the game's agent list (agent_list_walk); 2: compare once with a memory scan */
 static double g_scanms = 2.0;         /* scanms <ms>: time budget per frame of the NPC / vehicle memory scans (0 = bytes only) */
 static void br_start(int port);
@@ -1800,6 +1803,10 @@ static void native_cmd(const char *ln)
         g_acstream = n; if (!n && g_acf) { fclose(g_acf); g_acf = NULL; } logf_("acstream %d", n);
     } else if (sscanf(ln, "perf %d", &n) == 1) {
         g_perf = n; logf_("perf %d", n);
+    } else if (!strncmp(ln, "almsend", 7)) {
+        g_alm_force = 1; logf_("almsend: ALM1 on the next tick (test)");
+    } else if (sscanf(ln, "almsync %d", &n) == 1) {
+        g_almsync = n; logf_("almsync %d", n);
     } else if (sscanf(ln, "cfav %d", &n) == 1) {
         g_cfav = n; logf_("cfav %d", n);
     } else if (!strncmp(ln, "cfdump", 6)) {
@@ -3041,6 +3048,8 @@ static void st_deliver(const HitPkt *hp, BYTE *target, void *orig, unsigned long
 }
 
 /* NHIT on the host: the joiner's player hit this NPC there */
+static HitPkt g_alm_tmpl;   /* almsync: the last joiner hit, a template for the alarm kick */
+static int g_alm_have;
 static void npc_hit_apply(const NpcHitPkt *nk)
 {
     void *hd = NULL;
@@ -3052,6 +3061,15 @@ static void npc_hit_apply(const NpcHitPkt *nk)
     {
         /* health before and after: a wounded NPC finished on the joiner stayed alive here (#18) */
         float mx = 0, before = npc_hp(obj, &mx), after;
+        if (!g_alm_have || nk->h.subvt != g_alm_tmpl.subvt) {
+            /* keep it for the next sessions too (bin\coop_alm_tmpl.bin): a joiner's first shot can be a miss */
+            char path[MAX_PATH];
+            FILE *f;
+            GetModuleFileNameA(g_self, path, MAX_PATH);
+            strcpy(strrchr(path, '\\') + 1, "coop_alm_tmpl.bin");
+            if ((f = fopen(path, "wb"))) { fwrite(&nk->h, sizeof nk->h, 1, f); fclose(f); }
+        }
+        g_alm_tmpl = nk->h; g_alm_have = 1;
         st_deliver(&nk->h, obj, *(void ***)obj == &g_st_vt[2][1] ? g_st_orig[2] : (*(void ***)obj)[0x20 / 4], g_npchitsrc ? g_net_id : g_av_id);
         after = npc_hp(obj, &mx);
         if (++g_nhit_rx <= 400) logf_("npc hit %u: the joiner hit NPC %llu (type %d, amount %d, part %08x) -> applied, hp %.0f -> %.0f of %.0f", nk->h.seq, nk->npc, nk->h.type, nk->h.amount, nk->h.part, before, after, mx);
@@ -3137,7 +3155,7 @@ static void cf_tick(DWORD now)
     static struct { unsigned long long id; int st, zk, zf; } prev[NPC_MAX + 1];
     BYTE *g, *s;
     int i;
-    if ((!g_cflog && !g_cfav) || now - last < 250) return;
+    if ((!g_cflog && !g_cfav && !g_almsync) || now - last < 250) return;
     last = now;
     g = *(BYTE **)(g_base + 0x1607408);
     s = g && !IsBadReadPtr(g + 0xC, 4) ? *(BYTE **)(g + 0xC) : NULL;
@@ -3154,6 +3172,54 @@ static void cf_tick(DWORD now)
             if (s[0x198] && (ag[0x99C] & 2)) { *(int *)(ag + 0x998) = 0; ag[0x99C] &= ~2; }
             if (s[0x198] != was) logf_("cfav: host town alarm %d -> %d, avatar zone flags now %02x", was, s[0x198], ag[0x99C]);
             was = s[0x198];
+        }
+    }
+    /* almsync: B's ceasefire breaks at B's own shot (even a miss); the host only sees hits, and a first hit that kills
+     * puts no NPC into combat there, so the host's town stayed calm 6-24 s. The joiner sends ALM1 when its alarm rises;
+     * the host, if still calm, gives the living NPC nearest to the avatar a 1-point hit from its player, made from the
+     * last joiner hit, every 2 s until its own alarm is up (at most 15 s) */
+    if (g_almsync && s && !IsBadReadPtr(s + 0x198, 1)) {
+        static BYTE jprev;
+        static DWORD lastkick;
+        if (g_npc_role == 2 && ((s[0x198] && !jprev) || g_alm_force) && g_ns != INVALID_SOCKET) {
+            g_alm_force = 0;
+            unsigned pk[2] = { 0x314D4C41u, 1 };
+            sendto(g_ns, (char *)pk, sizeof pk, 0, (struct sockaddr *)&g_peer, sizeof g_peer);
+            logf_("almsync: our town alarm is up -> told the host");
+        }
+        if (g_npc_role == 2) jprev = s[0x198];
+        if (g_npc_role == 1 && g_alm_pending && !g_alm_have) {
+            char path[MAX_PATH];
+            FILE *f;
+            GetModuleFileNameA(g_self, path, MAX_PATH);
+            strcpy(strrchr(path, '\\') + 1, "coop_alm_tmpl.bin");
+            if ((f = fopen(path, "rb"))) { if (fread(&g_alm_tmpl, sizeof g_alm_tmpl, 1, f) == 1) { g_alm_have = 1; logf_("almsync: hit template loaded from %s", path); } fclose(f); }
+        }
+        if (g_npc_role == 1 && g_alm_pending) {
+            if (s[0x198] || (int)(now - g_alm_pending) > 15000) { logf_("almsync: host alarm %s", s[0x198] ? "up" : "still down after 15 s, giving up"); g_alm_pending = 0; }
+            else if (g_alm_have && now - lastkick > 2000) {
+                void *ha = NULL;
+                BYTE *av = g_av_id ? entity_obj(g_av_id, &ha) : NULL, *best = NULL;
+                unsigned long long bid = 0;
+                float bd = 60.0f * 60.0f;
+                if (ha) (*(int *)((BYTE *)ha + 8))--;
+                for (i = 0; av && i < g_nh_n; i++) {
+                    void *hd = NULL;
+                    BYTE *o = entity_obj(g_nh[i].id, &hd);
+                    float mx = 0, dx, dy;
+                    if (hd) (*(int *)((BYTE *)hd + 8))--;
+                    if (!o || npc_hp(o, &mx) <= 0) continue;
+                    dx = *(float *)(o + 0x60) - *(float *)(av + 0x60); dy = *(float *)(o + 0x64) - *(float *)(av + 0x64);
+                    if (dx * dx + dy * dy < bd) { bd = dx * dx + dy * dy; best = o; bid = g_nh[i].id; }
+                }
+                lastkick = now;
+                if (best) {
+                    HitPkt k = g_alm_tmpl;
+                    k.amount = 1;
+                    st_deliver(&k, best, *(void ***)best == &g_st_vt[2][1] ? g_st_orig[2] : (*(void ***)best)[0x20 / 4], g_net_id);
+                    logf_("almsync: kicked NPC %llu (%.0f m from the avatar) with a 1-point hit", bid, sqrtf(bd));
+                }
+            }
         }
     }
     if (!g_cflog) return;
@@ -6426,6 +6492,7 @@ static void net_tick(void)
         if (r == (int)sizeof(NpcMsPkt) && rb.magic == NMS_MAGIC) { if (from.sin_addr.s_addr == g_peer.sin_addr.s_addr) nms_rx((const NpcMsPkt *)&rb); continue; }
         if (r == (int)sizeof(NpcAnimPkt) && rb.magic == NANM_MAGIC) { if (from.sin_addr.s_addr == g_peer.sin_addr.s_addr) npc_anim_rx((const NpcAnimPkt *)&rb); continue; }
         if (r == (int)sizeof(NpcHitPkt) && rb.magic == NSHT_MAGIC) { if (from.sin_addr.s_addr == g_peer.sin_addr.s_addr) npc_shot_apply((const NpcHitPkt *)&rb); continue; }
+        if (r == 8 && rb.magic == 0x314D4C41u) { if (from.sin_addr.s_addr == g_peer.sin_addr.s_addr && g_npc_role == 1 && g_almsync) { if (!g_alm_pending) logf_("almsync: the joiner's town is alarmed"); g_alm_pending = GetTickCount() | 1; } continue; }
         if (r == (int)sizeof(NpcHitPkt) && rb.magic == NHIT_MAGIC) { if (from.sin_addr.s_addr == g_peer.sin_addr.s_addr) npc_hit_apply((const NpcHitPkt *)&rb); continue; }
         if (r > 4 && r < 68 && rb.magic == NAM_MAGIC) {
             /* only while the peer's game is really there: after it left, its relay keeps sending the name for ~20 s and
