@@ -23,7 +23,7 @@
   ],
   "problems": [
     {"field": "link age ms",    "op": ">",  "value": 1000, "say": "{copy}: nothing from the other copy for {value} ms"},
-    {"field": "NPCs sent",      "op": ">=", "value": 24,   "say": "{copy}: the NPC limit (24) is reached, more NPCs are not synced"},
+    {"field": "NPCs sent",      "op": ">=", "value": 64,   "say": "{copy}: the NPC limit (64) is reached, more NPCs are not synced"},
     {"field": "worst frame ms", "op": ">",  "value": 100,  "say": "{copy}: a {value} ms frame in the last 10 s"},
     {"differs": "town alarm",   "say": "the town alarm differs between the copies: {values}"}
   ]

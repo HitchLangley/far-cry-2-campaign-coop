@@ -572,6 +572,7 @@ static int g_cflog;                  /* cflog 0|1: ceasefire research log (cf_ti
 static int g_agentlist = 1, g_agentcmp;  /* agentlist 0|1: NPCs from the game's agent list (agent_list_walk); 2: compare once with a memory scan */
 static double g_scanms = 2.0;         /* scanms <ms>: time budget per frame of the NPC / vehicle memory scans (0 = bytes only) */
 static void br_start(int port);
+static float npc_hp(BYTE *obj, float *hpmax);
 static int g_acstream;               /* acstream 0|1: animcheck probe stream (ac_tick) */
 static FILE *g_acf;
 static int g_perf = 1;                /* perf 0|1: frame timing log (perf_frame) */
@@ -3048,8 +3049,13 @@ static void npc_hit_apply(const NpcHitPkt *nk)
     obj = entity_obj(nk->npc, &hd);
     if (hd) (*(int *)((BYTE *)hd + 8))--;
     if (!obj) return;
-    st_deliver(&nk->h, obj, *(void ***)obj == &g_st_vt[2][1] ? g_st_orig[2] : (*(void ***)obj)[0x20 / 4], g_npchitsrc ? g_net_id : g_av_id);
-    if (++g_nhit_rx <= 50) logf_("npc hit %u: the joiner hit NPC %llu (type %d, amount %d, part %08x) -> applied", nk->h.seq, nk->npc, nk->h.type, nk->h.amount, nk->h.part);
+    {
+        /* health before and after: a wounded NPC finished on the joiner stayed alive here (#18) */
+        float mx = 0, before = npc_hp(obj, &mx), after;
+        st_deliver(&nk->h, obj, *(void ***)obj == &g_st_vt[2][1] ? g_st_orig[2] : (*(void ***)obj)[0x20 / 4], g_npchitsrc ? g_net_id : g_av_id);
+        after = npc_hp(obj, &mx);
+        if (++g_nhit_rx <= 400) logf_("npc hit %u: the joiner hit NPC %llu (type %d, amount %d, part %08x) -> applied, hp %.0f -> %.0f of %.0f", nk->h.seq, nk->npc, nk->h.type, nk->h.amount, nk->h.part, before, after, mx);
+    }
 }
 
 /* a HIT from the peer: the peer's player hit our avatar there, so our player takes it here. Bullet hits are rebuilt as
@@ -3112,10 +3118,10 @@ static void hit_tick(DWORD now)
  * role, NetPlayer base beautifier, MP-flag window on the third-person main beautifier); afterwards the host's
  * fields are written into its memento every frame. Health travels too, so a kill on the host kills the puppet. */
 #define NPC_MAGIC 0x3143504Eu
-#define NPC_MAX 24
+#define NPC_MAX 64   /* 24 filled up in a town fight: reinforcements past it never reached the joiner (#10) */
 #pragma pack(push, 1)
 typedef struct { unsigned long long id; float pos[3]; int vel[3], aim[4]; unsigned char s104, s11c, s110, pad; float hp, hpmax; unsigned pulls; float shot[3]; } NpcEnt;
-typedef struct { unsigned magic, seq, count; NpcEnt e[NPC_MAX]; } NpcPkt;
+typedef struct { unsigned magic, seq, count, total; NpcEnt e[NPC_MAX]; } NpcPkt;   /* count in this datagram, total in the host's list */
 #pragma pack(pop)
 static struct { unsigned long long id; BYTE *mem, *obj; unsigned shots, fires; BYTE lastfire; void *wcur; int wmode; char wname[64]; unsigned wcat; DWORD wsent; unsigned lastact, animhash; DWORD animsent; } g_nh[NPC_MAX];
 static int g_nh_n;
@@ -3837,9 +3843,9 @@ static void npc_host_tick(DWORD now)
     for (i = 0; i < n; i += 12) {
         NpcPkt part;
         int c = n - i < 12 ? n - i : 12;
-        part.magic = NPC_MAGIC; part.seq = pk.seq; part.count = c;
+        part.magic = NPC_MAGIC; part.seq = pk.seq; part.count = c; part.total = n;
         memcpy(part.e, pk.e + i, c * sizeof(NpcEnt));
-        sendto(g_ns, (char *)&part, 12 + c * sizeof(NpcEnt), 0, (struct sockaddr *)&g_peer, sizeof g_peer);
+        sendto(g_ns, (char *)&part, 16 + c * sizeof(NpcEnt), 0, (struct sockaddr *)&g_peer, sizeof g_peer);
     }
 }
 static unsigned g_np_hostcount;
@@ -3899,12 +3905,21 @@ static void npc_rx(const NpcPkt *pk, int len)
 {
     unsigned i;
     int j;
-    if (g_npc_role != 2 || len < 12 || pk->count > NPC_MAX || len < (int)(12 + pk->count * sizeof(NpcEnt))) return;
-    g_np_hostcount = pk->count;
+    if (g_npc_role != 2 || len < 16 || pk->count > NPC_MAX || len < (int)(16 + pk->count * sizeof(NpcEnt))) return;
+    g_np_hostcount = pk->total;   /* was the datagram's count (12 at most), so "the host's list is full" never held */
     if (!g_np_first) g_np_first = GetTickCount() | 1;
     for (i = 0; i < pk->count; i++) {
         for (j = 0; j < g_np_n && g_np[j].id != pk->e[i].id; j++) ;
-        if (j == g_np_n) { if (g_np_n >= NPC_MAX) continue; memset(&g_np[j], 0, sizeof g_np[j]); g_np[j].id = pk->e[i].id; g_np_n++; }
+        if (j == g_np_n && g_np_n >= NPC_MAX) {
+            /* full: reuse the slot of an NPC the host has not sent for 30 s and that is no live puppet here (slots were never freed) */
+            DWORD nowr = GetTickCount();
+            int k, best = -1;
+            for (k = 0; k < g_np_n; k++) if ((int)(nowr - g_np[k].last) > 30000 && (g_np[k].state != 1 || g_np[k].gone) && (best < 0 || g_np[k].last < g_np[best].last)) best = k;
+            if (best < 0) continue;
+            logf_("npcsync join: slot %d of NPC %llu reused for %llu (not sent for %lu s)", best, g_np[best].id, pk->e[i].id, (unsigned long)((nowr - g_np[best].last) / 1000));
+            j = best; g_np_sn[j] = 0; g_np_miss[j] = 0; g_np_rm[j] = 0; g_np_firet[j] = 0;
+            memset(&g_np[j], 0, sizeof g_np[j]); g_np[j].id = pk->e[i].id;
+        } else if (j == g_np_n) { memset(&g_np[j], 0, sizeof g_np[j]); g_np[j].id = pk->e[i].id; g_np_n++; }
         g_np[j].e = pk->e[i]; g_np[j].last = GetTickCount();
         if (g_np_sn[j]) {
             /* spin research: how fast the yaw the host sends changes */
