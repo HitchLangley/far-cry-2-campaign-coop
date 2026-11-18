@@ -361,6 +361,9 @@ static volatile LONG g_ms_skips;
 static int g_nmslayers;
 static int g_npcface;
 static void wbp_start(int n);
+static volatile LONG g_wbp_hits;
+static LONG g_wbp_read, g_wbp_max;
+static void wbp_set(DWORD addr);
 static int g_npcflag;
 static void wbp_tick(void);
 static int g_npcsigdrop = 1;         /* npcsigdrop 0|1 */
@@ -596,7 +599,11 @@ static int tgt_swap(void);
 static void tgt_wbp(int nmax);
 static void tgtav_tick(void);
 static void tgt_why(void);
-static int g_tgtav = 1;               /* tgtav 0|1: host NPCs nearer the joiner's avatar take it as "the player" in their threat scan */
+static DWORD g_agupd_real;
+static int g_tgtav = 2;               /* tgtav 0|1|2: host NPCs nearer the joiner's avatar take it as the player: 1 in their threat scan, 2 (default) in their whole update */
+static int g_pvpimpact;               /* pvpimpact 0|1: player-to-player impact stims (type 7) do damage (default 0: dropped) */
+static int g_pdmglog = 0;             /* pdmglog 0|1: log what reaches the player damage handler 6A2880 (research) */
+static float av_dist_me(void);
 static float npc_hp(BYTE *obj, float *hpmax);
 static int g_acstream;               /* acstream 0|1: animcheck probe stream (ac_tick) */
 static FILE *g_acf;
@@ -1827,6 +1834,19 @@ static void native_cmd(const char *ln)
         g_perf = n; logf_("perf %d", n);
     } else if (!strncmp(ln, "tgtwhy", 6)) {
         tgt_why();
+    } else if (sscanf(ln, "hpwbp %d", &n) == 1) {
+        /* RE: hardware write breakpoint on our player's health (health component +0x10): who lowers it */
+        void *hd = NULL; BYTE *me = g_net_id ? entity_obj(g_net_id, &hd) : NULL, *cc, *hc;
+        typedef void *(__attribute__((thiscall)) *gcomp_t)(void *ent, void *key);
+        if (hd) (*(int *)((BYTE *)hd + 8))--;
+        cc = me ? ((gcomp_t)(g_base + 0x4E2CC0))(me, (void *)(g_base + 0xFDF9A8)) : NULL;
+        hc = cc && !IsBadReadPtr(cc + 0x44, 4) ? *(BYTE **)(cc + 0x44) : NULL;
+        if (hc) { g_wbp_hits = 0; g_wbp_read = 0; g_wbp_max = n > 64 ? 64 : n; logf_("hpwbp: health at %p", hc + 0x10); wbp_set((DWORD)(hc + 0x10)); }
+        else logf_("hpwbp: no health component");
+    } else if (sscanf(ln, "pdmglog %d", &n) == 1) {
+        g_pdmglog = n; logf_("pdmglog %d", n);
+    } else if (sscanf(ln, "pvpimpact %d", &n) == 1) {
+        g_pvpimpact = n; logf_("pvpimpact %d", n);
     } else if (sscanf(ln, "tgtav %d", &n) == 1) {
         g_tgtav = n; logf_("tgtav %d", n);
     } else if (sscanf(ln, "tgtwbp %d", &n) == 1) {
@@ -2925,6 +2945,17 @@ static int av_near_me(float r)
     if (h2) (*(int *)((BYTE *)h2 + 8))--;
     return touch;
 }
+/* ground-plane distance from our player to the avatar, -1 if either is missing */
+static float av_dist_me(void)
+{
+    void *h1 = NULL, *h2 = NULL;
+    BYTE *a = g_av_id ? entity_obj(g_av_id, &h1) : NULL, *m = entity_obj(g_net_id, &h2);
+    float d = -1;
+    if (a && m) { float dx = *(float *)(a + 0x60) - *(float *)(m + 0x60), dy = *(float *)(a + 0x64) - *(float *)(m + 0x64); d = sqrtf(dx * dx + dy * dy); }
+    if (h1) (*(int *)((BYTE *)h1 + 8))--;
+    if (h2) (*(int *)((BYTE *)h2 + 8))--;
+    return d;
+}
 static int __attribute__((thiscall)) st_hook(BYTE *self, BYTE *ev)
 {
     int s = *(void ***)self == &g_st_vt[1][1] ? 1 : *(void ***)self == &g_st_vt[2][1] ? 2 : 0;
@@ -2944,6 +2975,13 @@ static int __attribute__((thiscall)) st_hook(BYTE *self, BYTE *ev)
         unsigned long long inst = st_hid(*(BYTE **)(ev + 0x40));
         unsigned long long by = src == g_net_id || inst == g_net_id ? g_net_id : src;
         unsigned long long byav = g_av_id && (src == g_av_id || inst == g_av_id) ? g_av_id : src;
+        /* impact stims (type 7, the base stim class E1C120 that physics collisions and AI melee use) from our player on
+         * the avatar: the two bodies touching gave 6 damage a time on the other PC (owner: "damage on collision"); not
+         * sent unless pvpimpact 1. Bullets (type 3, E119A4) and explosions are unchanged. */
+        if (g_hitsync && s == 0 && by == g_net_id && !g_pvpimpact && *(int *)(ev + 0x48) == 7 && evt - (unsigned)g_base == 0xE1C120) {
+            static unsigned n;
+            if (++n <= 50) logf_("hit: impact on the avatar not sent (type 7, amount %d) - player collisions do no damage", *(int *)(ev + 0x58));
+        } else
         if (g_hitsync && s == 0 && by == g_net_id && *(int *)(ev + 0x58) && g_ns != INVALID_SOCKET) {
             HitPkt hp;
             st_pack(&hp, ev, evt);
@@ -3128,6 +3166,8 @@ static void hit_apply(const HitPkt *hp)
     me = entity_obj(g_net_id, &hd);
     if (hd) (*(int *)((BYTE *)hd + 8))--;
     if (!me || *(void ***)me != &g_st_vt[1][1]) return;
+    /* an impact from an older peer (see pvpimpact) */
+    if (!g_pvpimpact && hp->type == 7 && hp->subvt == 0xE1C120) { logf_("hit %u: the peer's impact on us ignored (amount %d)", hp->seq, hp->amount); return; }
     st_deliver(hp, me, g_st_orig[1], g_av_id);
     if (++g_hit_rx <= 50) logf_("hit %u: the peer hit us (type %d, amount %d, flags %x, part %08x, sub rva %x) -> applied", hp->seq, hp->type, hp->amount, hp->flags, hp->part, hp->subvt);
 }
@@ -5546,6 +5586,43 @@ static void map_tick(DWORD now)
     }
     g_mk_respawn = 0;
 }
+/* Player damage handler FUN_106a2880 (thiscall: the player's damage component, stim; ret 4), found with hpwbp: the
+ * health falls at D+103F7E from 2B788A <- 29DA37 <- this handler; it is reached without the entity stim path that
+ * st_hook sees. Pushing into the other player's avatar gave impact stims (type 7) here: 5-16 HP a bump on both copies
+ * (owner: "damage on collision"). Dropped unless pvpimpact 1: type 7 with the avatar as source (or none, avatar within
+ * 2 m), and collision stims (class E130A0, type 4) while the avatar is within 1.5 m. */
+static void *g_pdmg_orig;
+static void __attribute__((thiscall)) pdmg_hook(BYTE *self, BYTE *st)
+{
+    if (g_pdmglog && st && !IsBadReadPtr(st, 0x60)) {
+        static unsigned n;
+        if (++n <= 200) logf_("pdmg: self %p owner %llu, stim vt %lx type %d amount %d flags %x src %llu inst %llu, avatar %.1f m", self,
+                              self && !IsBadReadPtr(self + 8, 4) ? st_hid(*(BYTE **)(self + 8)) : 0ull, (unsigned long)(*(DWORD *)st - (DWORD)g_base),
+                              *(int *)(st + 0x48), *(int *)(st + 0x58), *(unsigned *)(st + 0x5C), st_hid(*(BYTE **)(st + 0x3C)), st_hid(*(BYTE **)(st + 0x40)), av_dist_me());
+    }
+    if (!g_pvpimpact && st && !IsBadReadPtr(st, 0x60) && g_av_id && self && !IsBadReadPtr(self + 8, 4)
+        && st_hid(*(BYTE **)(self + 8)) == g_net_id) {   /* self+8: the owner entity's handle (id at +0) */
+        unsigned long long src = st_hid(*(BYTE **)(st + 0x3C));
+        int ty = *(int *)(st + 0x48);
+        /* A/B 2026-11-18 (pdmglog): every bump was a collision stim (class E130A0, type 4, amount 0-1, ~5 HP each) with
+         * the avatar 0.8-1.0 m away and an unrelated NPC 24 m off as "source"; the same on both copies */
+        if ((ty == 7 && (src == g_av_id || ((!src || src == g_net_id) && av_near_me(2.0f))))
+            || (*(DWORD *)st - (DWORD)g_base == 0xE130A0 && ty == 4 && av_near_me(1.5f))) {
+            static unsigned n;
+            if (++n <= 50) logf_("bump: impact on us from the avatar dropped (type %d, amount %d, src %s)", ty, *(int *)(st + 0x58), src == g_av_id ? "avatar" : src == g_net_id ? "us" : src ? "other" : "none");
+            return;
+        }
+    }
+    ((void (__attribute__((thiscall)) *)(BYTE *, BYTE *))g_pdmg_orig)(self, st);
+}
+static void pdmg_install(void)
+{
+    static const BYTE pro[7] = { 0x83, 0xEC, 0x14, 0x53, 0x55, 0x56, 0x57 };
+    if (g_pdmg_orig) return;
+    if (memcmp(g_base + 0x6A2880, pro, 7)) { logf_("bump: unexpected bytes at 6A2880, no damage hook"); g_pdmg_orig = (void *)1; return; }
+    g_pdmg_orig = make_detour(g_base + 0x6A2880, 7, (void *)pdmg_hook, 1);
+    logf_("bump: player damage hook on 6A2880 installed");
+}
 /* our player's health, logged when it changes (to tell real damage from hit reactions) */
 static void hp_tick(DWORD now)
 {
@@ -5556,6 +5633,7 @@ static void hp_tick(DWORD now)
     float hp, mx;
     if (now - last < 250) return;
     last = now;
+    pdmg_install();
     me = g_net_id ? entity_obj(g_net_id, &hd) : NULL;
     if (hd) (*(int *)((BYTE *)hd + 8))--;
     if (!me) return;
@@ -6652,6 +6730,25 @@ static int __attribute__((thiscall)) tgt_scan_hook(BYTE *sc, void *arg)
     DWORD *glob = (DWORD *)(g_base + 0x1652108), was;
     int r;
     g_tgt_calls++;
+    {
+        /* RE, once: return addresses above us on the stack (a DWORD inside Dunia's code preceded by a call opcode) */
+        static int done;
+        if (!done && ag && ag != aag) {
+            DWORD *sp = (DWORD *)&ag, lo = (DWORD)g_base + 0x1000, hi = (DWORD)g_base + 0xE00000;
+            char line[600];
+            int k, o = 0;
+            done = 1;
+            for (k = 0; k < 1200 && o < (int)sizeof line - 12; k++) {
+                DWORD v;
+                if (IsBadReadPtr(sp + k, 4)) break;
+                v = sp[k];
+                if (v > lo && v < hi && !IsBadReadPtr((BYTE *)v - 6, 6) && (((BYTE *)v)[-5] == 0xE8 || ((BYTE *)v)[-2] == 0xFF || ((BYTE *)v)[-3] == 0xFF || ((BYTE *)v)[-6] == 0xFF))
+                    o += snprintf(line + o, sizeof line - o, " %lx", (unsigned long)(v - (DWORD)g_base));
+            }
+            line[o] = 0;
+            logf_("tgtav: scanner caller chain (stack scan):%s", line);
+        }
+    }
     if (!g_tgtav || !aag || !ag || ag == aag || ag == (BYTE *)*glob || !*glob) return ((orig_t)g_tgt_orig)(sc, arg);
     {
         typedef float *(__attribute__((thiscall)) *pos_t)(void *, float *);
@@ -6662,11 +6759,62 @@ static int __attribute__((thiscall)) tgt_scan_hook(BYTE *sc, void *arg)
     }
     {
         BYTE pf = aag[0x94C];
-        was = *glob; *glob = (DWORD)aag; aag[0x94C] = 1; g_tgt_swaps++;
+        DWORD rp = g_agupd_real;
+        was = *glob; *glob = (DWORD)aag; aag[0x94C] = 1; g_tgt_swaps++; if (!rp) g_agupd_real = was;
         r = ((orig_t)g_tgt_orig)(sc, arg);
-        *glob = was; aag[0x94C] = pf;
+        *glob = was; aag[0x94C] = pf; g_agupd_real = rp;
     }
     return r;
+}
+/* tgtav 2: the agent update FUN_10973490 (thiscall agent, float dt; ret 4; from the AI world tick 95E17A) runs
+ * perception, decisions and the AI graph (which calls the threat scanner). Much of it reads the global player agent
+ * [D+1652108] directly (where to search, move, aim), so NPCs that had the avatar as a target still went for our player
+ * 106 m away (2026-11-17: 88% of scans on the avatar, 3 hits on B). While an NPC nearer the avatar than our player
+ * updates, the avatar's agent is the player (global + agent+0x94C); both are restored after the call. */
+static void *g_agupd_orig;
+static unsigned g_agupd_swaps, g_agupd_calls;
+static DWORD g_agupd_real;   /* our player's agent while the global points at the avatar (0 otherwise) */
+/* FUN_10963510 (thiscall agent, other agent; ret 4) compares two agents' rank; for the global player agent it reads
+ * the player-only component 11649838 (+0x180), which the avatar lacks: A crashed at D+96367D 10 s into a tgtav 2 run
+ * (and at D+9635EF in 2026-11 with bIsAI 0). While the avatar is the global, this one function sees our player again,
+ * so the avatar is ranked as an ordinary agent. */
+static void *g_rank_orig;
+static int __attribute__((thiscall)) rank_hook(BYTE *a, BYTE *b)
+{
+    typedef int (__attribute__((thiscall)) *orig_t)(BYTE *, BYTE *);
+    DWORD *glob = (DWORD *)(g_base + 0x1652108), cur;
+    int r;
+    if (!g_agupd_real) return ((orig_t)g_rank_orig)(a, b);
+    cur = *glob; *glob = g_agupd_real;
+    r = ((orig_t)g_rank_orig)(a, b);
+    *glob = cur;
+    return r;
+}
+static void __attribute__((thiscall)) agupd_hook(BYTE *ag, float dt)
+{
+    typedef void (__attribute__((thiscall)) *orig_t)(BYTE *, float);
+    BYTE *aag = g_tgt_aag;
+    DWORD *glob = (DWORD *)(g_base + 0x1652108), was;
+    g_agupd_calls++;
+    /* joiner: the game recounts its town alarm (+0x198) from its own NPCs every frame; with the fight far away (the host
+     * broke the ceasefire 106 m off) none of ours fight, so the alarm set from the host was 0 again when our player's
+     * update showed the ceasefire message (FUN_109613a0: no "Escape the cease-fire zone" on B). It is set right before
+     * our player agent's update while the host is alarmed. */
+    if (g_npc_role == 2 && g_almsync && g_alm_host && ag && ag == (BYTE *)*glob) alm_set(g_alm_zone_rx);
+    if (g_tgtav < 2 || !aag || !ag || ag == aag || ag == (BYTE *)*glob || !*glob) { ((orig_t)g_agupd_orig)(ag, dt); return; }
+    {
+        typedef float *(__attribute__((thiscall)) *pos_t)(void *, float *);
+        float q[4], *v = ((pos_t)(*(void ***)ag)[0x78 / 4])(ag, q), da, db;
+        da = (v[0] - g_tgt_pp[0]) * (v[0] - g_tgt_pp[0]) + (v[1] - g_tgt_pp[1]) * (v[1] - g_tgt_pp[1]);
+        db = (v[0] - g_tgt_ap[0]) * (v[0] - g_tgt_ap[0]) + (v[1] - g_tgt_ap[1]) * (v[1] - g_tgt_ap[1]);
+        if (db >= da) { ((orig_t)g_agupd_orig)(ag, dt); return; }
+    }
+    {
+        BYTE pf = aag[0x94C];
+        was = *glob; *glob = (DWORD)aag; aag[0x94C] = 1; g_agupd_swaps++; g_agupd_real = was;
+        ((orig_t)g_agupd_orig)(ag, dt);
+        *glob = was; aag[0x94C] = pf; g_agupd_real = 0;
+    }
 }
 static void tgtav_tick(void)
 {
@@ -6675,13 +6823,26 @@ static void tgtav_tick(void)
     void *h1 = NULL, *h2 = NULL;
     BYTE *po, *ao, *c2;
     DWORD now = GetTickCount();
-    if (g_npc_role != 1 || !g_tgtav) { g_tgt_aag = NULL; return; }
+    if (!g_npc_role || (g_npc_role == 1 && !g_tgtav)) { g_tgt_aag = NULL; return; }
     if (!g_tgt_orig) {
         static const BYTE pro[6] = { 0x55, 0x8B, 0xEC, 0x83, 0xE4, 0xF8 };
         if (memcmp(g_base + 0x99A050, pro, 6)) { logf_("tgtav: unexpected bytes at 99A050, off"); g_tgtav = 0; return; }
         g_tgt_orig = make_detour(g_base + 0x99A050, 6, (void *)tgt_scan_hook, 1);
         logf_("tgtav: threat scanner hook on 99A050 installed");
     }
+    if (!g_rank_orig) {
+        static const BYTE pr[8] = { 0x8B, 0x44, 0x24, 0x04, 0x83, 0xEC, 0x10, 0x56 };
+        if (memcmp(g_base + 0x963510, pr, 8)) { logf_("tgtav: unexpected bytes at 963510, tgtav 2 off"); g_rank_orig = (void *)1; g_tgtav = 1; }
+        else { g_rank_orig = make_detour(g_base + 0x963510, 8, (void *)rank_hook, 1); logf_("tgtav: rank hook on 963510 installed"); }
+    }
+    if (!g_agupd_orig) {
+        /* sub esp,14h; mov eax,[D+1606360] (8 bytes, absolute address: moves with the trampoline unchanged) */
+        BYTE pro[8] = { 0x83, 0xEC, 0x14, 0xA1 };
+        *(DWORD *)(pro + 4) = (DWORD)g_base + 0x1606360;
+        if (memcmp(g_base + 0x973490, pro, 8)) { logf_("tgtav: unexpected bytes at 973490, no agent update hook"); g_agupd_orig = (void *)1; }
+        else { g_agupd_orig = make_detour(g_base + 0x973490, 8, (void *)agupd_hook, 1); logf_("tgtav: agent update hook on 973490 installed"); }
+    }
+    if (g_npc_role != 1) { g_tgt_aag = NULL; return; }
     po = entity_obj(g_net_id, &h1); ao = g_av_id ? entity_obj(g_av_id, &h2) : NULL;
     if (h1) (*(int *)((BYTE *)h1 + 8))--;
     if (h2) (*(int *)((BYTE *)h2 + 8))--;
@@ -6689,7 +6850,7 @@ static void tgtav_tick(void)
     if (!po || !c2) { g_tgt_aag = NULL; return; }
     memcpy(g_tgt_pp, po + 0x60, 12); memcpy(g_tgt_ap, ao + 0x60, 12);
     g_tgt_aag = *(BYTE **)(c2 + 0x14);
-    if (now - lastlog > 10000 && g_tgt_swaps) { lastlog = now; logf_("tgtav: %u of %u threat scans took the avatar as the player", g_tgt_swaps, g_tgt_calls); g_tgt_swaps = g_tgt_calls = 0; }
+    if (now - lastlog > 10000 && (g_tgt_swaps || g_agupd_swaps)) { lastlog = now; logf_("tgtav: %u of %u threat scans and %u of %u agent updates took the avatar as the player", g_tgt_swaps, g_tgt_calls, g_agupd_swaps, g_agupd_calls); g_tgt_swaps = g_tgt_calls = g_agupd_swaps = g_agupd_calls = 0; }
 }
 /* tgtwhy (research): the threat scanner FUN_1099a050 takes another agent only if the NPC perceives it: record in the
  * perception map (agent+0x28C, map at [+0x24], key = other agent+0xC, FUN_10a235c0) with flag bits 0..2 all set and a
