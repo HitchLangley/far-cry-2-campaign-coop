@@ -27,7 +27,7 @@ over Steam. The newest work (enemies, NPC fights) has not been run on two PCs ye
 | Vehicles | Works on one PC: both players in one car, seats with animations |
 | Time of day | Synced from the host |
 | NPCs | The host runs all NPCs; the joiner shows them as puppets: movement, idle actions (sitting, smoking), mounted guns. Fights are rough (see issues) |
-| Enemies attacking the joiner | Experiment, off by default (`avai 1` on the host, needs a patched entity library): host NPCs shoot the joiner and the hits take the joiner's health, at outposts and in towns (town alarm shared by both players; NPCs nearer the joiner fight the joiner) |
+| Enemies attacking the joiner | Experiment, off by default (`avai 1` on the host, needs a patched entity library): host NPCs shoot the joiner and the hits take the joiner's health, at outposts and in towns (the town alarm is shared: whoever breaks the ceasefire, both players are hunted, and NPCs nearer the joiner fight the joiner) |
 | Not synced yet | Missions and story, pickups and other world state, death and revive, alarms at outposts (town alarms are synced) |
 
 Known problems are tracked in [Issues](https://github.com/HitchLangley/far-cry-2-campaign-coop/issues).
@@ -72,8 +72,9 @@ between two PCs on different networks over Steam.
   are passed to the host. One PC.
 - **Enemies fight the joiner** (experiment, off by default, `avai 1`): host NPCs see and shoot the joiner's avatar
   and the hits take the joiner's health. In towns the ceasefire alarm rises on both copies within about 0.1 s, and the
-  NPCs nearer the joiner than the host take the joiner as their target (the engine lets town NPCs target only "the
-  player"; the host flags the joiner's avatar as the player only while those NPCs pick a target). One PC.
+  NPCs nearer the joiner than the host take the joiner as their target, whichever player broke the ceasefire (the
+  engine lets town NPCs fight only "the player"; for the NPCs nearer the joiner, the host treats the joiner's avatar
+  as the player while they think). Bumping into each other does no damage. One PC.
 
 ### Tools for development
 - A Lua channel and about a hundred native commands inside the running game ([commands](docs/COMMANDS.md)).
