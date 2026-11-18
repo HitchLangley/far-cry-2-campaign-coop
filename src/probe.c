@@ -601,8 +601,10 @@ static void tgtav_tick(void);
 static void tgt_why(void);
 static DWORD g_agupd_real;
 static int g_tgtav = 2;               /* tgtav 0|1|2: host NPCs nearer the joiner's avatar take it as the player: 1 in their threat scan, 2 (default) in their whole update */
-static int g_pvpimpact;               /* pvpimpact 0|1: player-to-player impact stims (type 7) do damage (default 0: dropped) */
-static int g_pdmglog = 0;             /* pdmglog 0|1: log what reaches the player damage handler 6A2880 (research) */
+static int g_pvpimpact;               /* pvpimpact 0|1: collisions with the avatar and type 7 impacts between players do damage (default 0: dropped) */
+static int g_pdmglog;                 /* pdmglog 0|1: log what reaches the player damage handler 6A2880 (research) */
+static unsigned g_coll_seen;
+static int g_colllog;                 /* colllog 0|1: log who builds collision stims near the avatar (research) */
 static float av_dist_me(void);
 static float npc_hp(BYTE *obj, float *hpmax);
 static int g_acstream;               /* acstream 0|1: animcheck probe stream (ac_tick) */
@@ -1843,6 +1845,8 @@ static void native_cmd(const char *ln)
         hc = cc && !IsBadReadPtr(cc + 0x44, 4) ? *(BYTE **)(cc + 0x44) : NULL;
         if (hc) { g_wbp_hits = 0; g_wbp_read = 0; g_wbp_max = n > 64 ? 64 : n; logf_("hpwbp: health at %p", hc + 0x10); wbp_set((DWORD)(hc + 0x10)); }
         else logf_("hpwbp: no health component");
+    } else if (sscanf(ln, "colllog %d", &n) == 1) {
+        g_colllog = n; logf_("colllog %d", n);
     } else if (sscanf(ln, "pdmglog %d", &n) == 1) {
         g_pdmglog = n; logf_("pdmglog %d", n);
     } else if (sscanf(ln, "pvpimpact %d", &n) == 1) {
@@ -2956,12 +2960,49 @@ static float av_dist_me(void)
     if (h2) (*(int *)((BYTE *)h2 + 8))--;
     return d;
 }
+/* the entity object of an id, without keeping a reference */
+static BYTE *entity_obj_peek(unsigned long long id)
+{
+    void *h = NULL;
+    BYTE *o = id ? entity_obj(id, &h) : NULL;
+    if (h) (*(int *)((BYTE *)h + 8))--;
+    return o;
+}
 static int __attribute__((thiscall)) st_hook(BYTE *self, BYTE *ev)
 {
     int s = *(void ***)self == &g_st_vt[1][1] ? 1 : *(void ***)self == &g_st_vt[2][1] ? 2 : 0;
     unsigned evt = ev && !IsBadReadPtr(ev, 0x24) ? *(unsigned *)ev : 0;
     const char *nm = evt ? st_name(ev) : "";
     if (!strcmp(nm, "IsUsable")) evt = 0;
+    if (s == 1 && g_av_id && evt && g_colllog && evt - (unsigned)g_base == 0xE130A0 && !IsBadReadPtr(ev, 0x9C) && ++g_coll_seen <= 60)
+    {
+        BYTE *h3c = *(BYTE **)(ev + 0x3C), *srco = h3c && !IsBadReadPtr(h3c, 0x10) ? *(BYTE **)(h3c + 0xC) : NULL;
+        void *ha = NULL; BYTE *avo = entity_obj(g_av_id, &ha);
+        if (ha) (*(int *)((BYTE *)ha + 8))--;
+        logf_("bump: collision stim on us: src %llu (obj %p, avatar obj %p) inst %llu +98 %llu (avatar %llu, us %llu) amount %d, avatar %.1f m", st_hid(h3c), srco, avo,
+              st_hid(*(BYTE **)(ev + 0x40)), st_hid(*(BYTE **)(ev + 0x98)), g_av_id, g_net_id, *(int *)(ev + 0x58), av_dist_me());
+    }
+    /* collision stims (class E130A0, ctor FUN_100682f0, sent by FUN_10510850 to the bodies through this entity event
+     * slot; source +0x3C = what we hit, +0x98 = us). Bumping into the avatar cost 5-16 HP with a pain shout and pose.
+     * Every such stim (A/B 2026-11-18, colllog) named as source the same town NPC 2054725516363054349, 24 m away, never
+     * the avatar (cause unknown: the avatar's capsule is reported as another pawn). A source farther than 5 m cannot
+     * touch us; with the avatar within 1.2 m that is the avatar, so the stim is dropped here, before damage and the
+     * pain reaction. Real hits by vehicles and NPCs come from next to us and are unchanged; pvpimpact 1 keeps all.
+     * Type 4 is taken for perception by the bump filter below, which is why that one (2026-10-30) missed it. */
+    if ((s == 1 || (s == 0 && self == entity_obj_peek(g_av_id))) && g_av_id && !g_pvpimpact && evt - (unsigned)g_base == 0xE130A0 && !IsBadReadPtr(ev, 0x9C) && av_near_me(1.2f)) {
+        BYTE *h3c = *(BYTE **)(ev + 0x3C), *so = h3c && !IsBadReadPtr(h3c, 0x10) ? *(BYTE **)(h3c + 0xC) : NULL;
+        BYTE *me = self;   /* the receiver: our player, or the avatar (its pain reaction showed on the peer's screen) */
+        float d2 = 1e9f;
+        if (so && me && !IsBadReadPtr(so + 0x60, 12)) {
+            float dx = *(float *)(so + 0x60) - *(float *)(me + 0x60), dy = *(float *)(so + 0x64) - *(float *)(me + 0x64), dz = *(float *)(so + 0x68) - *(float *)(me + 0x68);
+            d2 = dx * dx + dy * dy + dz * dz;
+        }
+        if (d2 > 25.0f) {
+            static unsigned n;
+            if (++n <= 50) logf_("bump: collision %s dropped (amount %d, named source %llu %.0f m away)", s ? "on us next to the avatar" : "on the avatar next to us", *(int *)(ev + 0x58), st_hid(h3c), sqrtf(d2));
+            return 0;
+        }
+    }
     if (s == 2 && evt && g_npcev_left > 0) {
         /* npcev: what the NPCs get, to find what starts their idle actions (flask, smoke) on the host */
         g_npcev_left--;
@@ -3250,7 +3291,7 @@ static void cf_tick(DWORD now)
         if (hd) (*(int *)((BYTE *)hd + 8))--;
         if (o && (cp = ((gc0_t)(g_base + 0x4E2CC0))(o, (void *)(g_base + 0xFE4090)))) ag = *(BYTE **)(cp + 0x14);
         if (ag && !IsBadReadPtr(ag + 0x998, 8)) {
-            if (s[0x198] && (ag[0x99C] & 2)) { *(int *)(ag + 0x998) = 0; ag[0x99C] &= ~2; }
+            if (s[0x198] && *(int *)(ag + 0x99C) != -1 && (ag[0x99C] & 2)) { *(int *)(ag + 0x998) = 0; ag[0x99C] &= ~2; }
             if (s[0x198] != was) logf_("cfav: host town alarm %d -> %d, avatar zone flags now %02x", was, s[0x198], ag[0x99C]);
             was = s[0x198];
         }
@@ -3266,7 +3307,7 @@ static void cf_tick(DWORD now)
                 if (!o3 || !(c3 = ((gc0_t)(g_base + 0x4E2CC0))(o3, (void *)(g_base + 0xFE4090)))) continue;
                 a3 = *(BYTE **)(c3 + 0x14);
                 if (!a3 || IsBadReadPtr(a3 + 0x998, 8)) continue;
-                if (*(int *)(a3 + 0x998) || (a3[0x99C] & 2)) { *(int *)(a3 + 0x998) = 0; a3[0x99C] &= ~2; nc++; }
+                if (*(int *)(a3 + 0x99C) != -1 && (*(int *)(a3 + 0x998) || (a3[0x99C] & 2))) { *(int *)(a3 + 0x998) = 0; a3[0x99C] &= ~2; nc++; }
             }
             if (nc && now - lastlog > 2000) { lastlog = now; logf_("cfav 2: %d NPC agents taken out of the ceasefire zone", nc); }
         }
@@ -5589,8 +5630,8 @@ static void map_tick(DWORD now)
 /* Player damage handler FUN_106a2880 (thiscall: the player's damage component, stim; ret 4), found with hpwbp: the
  * health falls at D+103F7E from 2B788A <- 29DA37 <- this handler; it is reached without the entity stim path that
  * st_hook sees. Pushing into the other player's avatar gave impact stims (type 7) here: 5-16 HP a bump on both copies
- * (owner: "damage on collision"). Dropped unless pvpimpact 1: type 7 with the avatar as source (or none, avatar within
- * 2 m), and collision stims (class E130A0, type 4) while the avatar is within 1.5 m. */
+ * (owner: "damage on collision"); those were collision stims, now dropped in st_hook. Research only: pdmglog 1 hooks it
+ * and logs every stim (set before the copy loads its save). */
 static void *g_pdmg_orig;
 static void __attribute__((thiscall)) pdmg_hook(BYTE *self, BYTE *st)
 {
@@ -5600,25 +5641,31 @@ static void __attribute__((thiscall)) pdmg_hook(BYTE *self, BYTE *st)
                               self && !IsBadReadPtr(self + 8, 4) ? st_hid(*(BYTE **)(self + 8)) : 0ull, (unsigned long)(*(DWORD *)st - (DWORD)g_base),
                               *(int *)(st + 0x48), *(int *)(st + 0x58), *(unsigned *)(st + 0x5C), st_hid(*(BYTE **)(st + 0x3C)), st_hid(*(BYTE **)(st + 0x40)), av_dist_me());
     }
-    if (!g_pvpimpact && st && !IsBadReadPtr(st, 0x60) && g_av_id && self && !IsBadReadPtr(self + 8, 4)
-        && st_hid(*(BYTE **)(self + 8)) == g_net_id) {   /* self+8: the owner entity's handle (id at +0) */
-        unsigned long long src = st_hid(*(BYTE **)(st + 0x3C));
-        int ty = *(int *)(st + 0x48);
-        /* A/B 2026-11-18 (pdmglog): every bump was a collision stim (class E130A0, type 4, amount 0-1, ~5 HP each) with
-         * the avatar 0.8-1.0 m away and an unrelated NPC 24 m off as "source"; the same on both copies */
-        if ((ty == 7 && (src == g_av_id || ((!src || src == g_net_id) && av_near_me(2.0f))))
-            || (*(DWORD *)st - (DWORD)g_base == 0xE130A0 && ty == 4 && av_near_me(1.5f))) {
-            static unsigned n;
-            if (++n <= 50) logf_("bump: impact on us from the avatar dropped (type %d, amount %d, src %s)", ty, *(int *)(st + 0x58), src == g_av_id ? "avatar" : src == g_net_id ? "us" : src ? "other" : "none");
-            return;
-        }
-    }
     ((void (__attribute__((thiscall)) *)(BYTE *, BYTE *))g_pdmg_orig)(self, st);
+}
+/* Collision stim constructor FUN_100682f0 (thiscall stim, src handle, instigator handle, other handle, 7 more; type 4,
+ * class E130A0). Callers (call sites): 510A58 / 510BCB, 5465C2 / 546698 and 545BF0 (character controller), 69F38.
+ * coll log (research): who builds one while the avatar is within 3 m. */
+static void *g_coll_orig;
+static void *__attribute__((thiscall)) coll_hook(BYTE *st, BYTE *h2, BYTE *h3, BYTE *h4, void *a5, void *a6, void *a7, void *a8, void *a9, int a10, void *a11)
+{
+    typedef void *(__attribute__((thiscall)) *orig_t)(BYTE *, BYTE *, BYTE *, BYTE *, void *, void *, void *, void *, void *, int, void *);
+    if (g_colllog && g_av_id && av_near_me(3.0f)) {
+        static unsigned n;
+        if (++n <= 200) logf_("coll: from D+%lx src %llu inst %llu other %llu (us %llu, avatar %llu), avatar %.1f m",
+                              (unsigned long)((DWORD)__builtin_return_address(0) - (DWORD)g_base), st_hid(h2), st_hid(h3), st_hid(h4), g_net_id, g_av_id, av_dist_me());
+    }
+    return ((orig_t)g_coll_orig)(st, h2, h3, h4, a5, a6, a7, a8, a9, a10, a11);
 }
 static void pdmg_install(void)
 {
     static const BYTE pro[7] = { 0x83, 0xEC, 0x14, 0x53, 0x55, 0x56, 0x57 };
-    if (g_pdmg_orig) return;
+    if (!g_coll_orig && g_colllog) {
+        static const BYTE cp[6] = { 0x53, 0x55, 0x56, 0x57, 0x8B, 0xF1 };
+        if (memcmp(g_base + 0x682F0, cp, 6)) { logf_("coll: unexpected bytes at 682F0"); g_coll_orig = (void *)1; }
+        else { g_coll_orig = make_detour(g_base + 0x682F0, 6, (void *)coll_hook, 1); logf_("coll: collision stim ctor hook on 682F0 installed"); }
+    }
+    if (g_pdmg_orig || !g_pdmglog) return;
     if (memcmp(g_base + 0x6A2880, pro, 7)) { logf_("bump: unexpected bytes at 6A2880, no damage hook"); g_pdmg_orig = (void *)1; return; }
     g_pdmg_orig = make_detour(g_base + 0x6A2880, 7, (void *)pdmg_hook, 1);
     logf_("bump: player damage hook on 6A2880 installed");
@@ -6849,7 +6896,15 @@ static void tgtav_tick(void)
     c2 = ao ? ((gc_t)(g_base + 0x4E2CC0))(ao, (void *)(g_base + 0xFE4090)) : NULL;
     if (!po || !c2) { g_tgt_aag = NULL; return; }
     memcpy(g_tgt_pp, po + 0x60, 12); memcpy(g_tgt_ap, ao + 0x60, 12);
-    g_tgt_aag = *(BYTE **)(c2 + 0x14);
+    {
+        /* only a finished agent: 0.3 s after the avatar spawned, its agent had zone flags -1 (not computed) and A
+         * crashed at D+7E1B0 (zone recount FUN_1095fd00 reading the pawn data of an agent without a pawn, +0x268) */
+        static unsigned long long seen_id;
+        static DWORD seen_at;
+        BYTE *ag = *(BYTE **)(c2 + 0x14);
+        if (g_av_id != seen_id) { seen_id = g_av_id; seen_at = now; }
+        g_tgt_aag = ag && !IsBadReadPtr(ag, 0xA00) && *(void **)(ag + 0x268) && *(int *)(ag + 0x99C) != -1 && now - seen_at > 3000 ? ag : NULL;
+    }
     if (now - lastlog > 10000 && (g_tgt_swaps || g_agupd_swaps)) { lastlog = now; logf_("tgtav: %u of %u threat scans and %u of %u agent updates took the avatar as the player", g_tgt_swaps, g_tgt_calls, g_agupd_swaps, g_agupd_calls); g_tgt_swaps = g_tgt_calls = g_agupd_swaps = g_agupd_calls = 0; }
 }
 /* tgtwhy (research): the threat scanner FUN_1099a050 takes another agent only if the NPC perceives it: record in the
